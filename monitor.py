@@ -1,0 +1,357 @@
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+
+X_API_BASE = "https://api.x.com/2"
+RESEND_API_URL = "https://api.resend.com/emails"
+DEFAULT_STATE_PATH = Path(__file__).with_name("state.json")
+
+
+@dataclass(frozen=True)
+class Config:
+    x_bearer_token: str
+    resend_api_key: str
+    alert_email: str
+    target_username: str = "thsottiaux"
+    from_email: str = "Tibo Monitor <onboarding@resend.dev>"
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        required = {
+            "X_BEARER_TOKEN": os.environ.get("X_BEARER_TOKEN", "").strip(),
+            "RESEND_API_KEY": os.environ.get("RESEND_API_KEY", "").strip(),
+            "ALERT_EMAIL": os.environ.get("ALERT_EMAIL", "").strip(),
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+        return cls(
+            x_bearer_token=required["X_BEARER_TOKEN"],
+            resend_api_key=required["RESEND_API_KEY"],
+            alert_email=required["ALERT_EMAIL"],
+            target_username=os.environ.get("TARGET_USERNAME", "thsottiaux").strip().lstrip("@"),
+            from_email=os.environ.get(
+                "ALERT_FROM", "Tibo Monitor <onboarding@resend.dev>"
+            ).strip(),
+        )
+
+
+def request_json(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    payload: dict[str, Any] | None = None,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    body = None
+    request_headers = dict(headers or {})
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
+
+    request = urllib.request.Request(
+        url, data=body, headers=request_headers, method=method
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            content = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} from {url}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Request failed for {url}: {exc.reason}") from exc
+
+    if not content:
+        return {}
+    return json.loads(content.decode("utf-8"))
+
+
+class XClient:
+    def __init__(self, bearer_token: str):
+        self._headers = {"Authorization": f"Bearer {bearer_token}"}
+
+    def fetch_posts(
+        self, username: str, since_id: str | None
+    ) -> dict[str, Any]:
+        all_posts: list[dict[str, Any]] = []
+        all_users: dict[str, dict[str, Any]] = {}
+        all_included_posts: dict[str, dict[str, Any]] = {}
+        next_token: str | None = None
+
+        while True:
+            params = {
+                "query": f"from:{username} -is:retweet",
+                "max_results": "100" if since_id else "10",
+                "tweet.fields": (
+                    "author_id,conversation_id,created_at,in_reply_to_user_id,"
+                    "note_tweet,referenced_tweets"
+                ),
+                "expansions": (
+                    "author_id,in_reply_to_user_id,referenced_tweets.id,"
+                    "referenced_tweets.id.author_id"
+                ),
+                "user.fields": "id,name,username",
+            }
+            if since_id:
+                params["since_id"] = since_id
+            if next_token:
+                params["next_token"] = next_token
+
+            url = (
+                f"{X_API_BASE}/tweets/search/recent?"
+                f"{urllib.parse.urlencode(params)}"
+            )
+            page = request_json(url, headers=self._headers)
+            all_posts.extend(page.get("data", []))
+
+            includes = page.get("includes", {})
+            for user in includes.get("users", []):
+                all_users[user["id"]] = user
+            for post in includes.get("tweets", []):
+                all_included_posts[post["id"]] = post
+
+            next_token = page.get("meta", {}).get("next_token")
+            if not since_id or not next_token:
+                break
+
+        result: dict[str, Any] = {"data": all_posts, "includes": {}}
+        if all_users:
+            result["includes"]["users"] = list(all_users.values())
+        if all_included_posts:
+            result["includes"]["tweets"] = list(all_included_posts.values())
+        return result
+
+
+class ResendClient:
+    def __init__(self, api_key: str, from_email: str, to_email: str):
+        self._headers = {"Authorization": f"Bearer {api_key}"}
+        self._from_email = from_email
+        self._to_email = to_email
+
+    def send(
+        self,
+        *,
+        subject: str,
+        text: str,
+        html_body: str,
+        idempotency_key: str,
+    ) -> None:
+        headers = dict(self._headers)
+        headers["Idempotency-Key"] = idempotency_key
+        response = request_json(
+            RESEND_API_URL,
+            method="POST",
+            headers=headers,
+            payload={
+                "from": self._from_email,
+                "to": [self._to_email],
+                "subject": subject,
+                "text": text,
+                "html": html_body,
+            },
+        )
+        if not response.get("id"):
+            raise RuntimeError(f"Resend did not return an email ID: {response}")
+
+
+def load_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"initialized": False, "last_seen_id": None}
+    state = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        "initialized": bool(state.get("initialized", False)),
+        "last_seen_id": state.get("last_seen_id"),
+    }
+
+
+def save_state(path: Path, state: dict[str, Any]) -> None:
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def post_text(post: dict[str, Any]) -> str:
+    note_tweet = post.get("note_tweet")
+    if isinstance(note_tweet, dict) and note_tweet.get("text"):
+        return str(note_tweet["text"])
+    return str(post.get("text", ""))
+
+
+def classify_post(post: dict[str, Any]) -> str:
+    references = post.get("referenced_tweets") or []
+    reference_types = {item.get("type") for item in references}
+    if post.get("in_reply_to_user_id") or "replied_to" in reference_types:
+        return "回复"
+    if "quoted" in reference_types:
+        return "引用"
+    return "原创"
+
+
+def format_beijing_time(value: str | None) -> str:
+    if not value:
+        return "未知时间"
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def build_notification(
+    post: dict[str, Any],
+    includes: dict[str, Any],
+    username: str,
+) -> tuple[str, str, str]:
+    kind = classify_post(post)
+    created_at = format_beijing_time(post.get("created_at"))
+    content = post_text(post)
+    post_url = f"https://x.com/{username}/status/{post['id']}"
+
+    users = {user["id"]: user for user in includes.get("users", [])}
+    included_posts = {
+        included_post["id"]: included_post
+        for included_post in includes.get("tweets", [])
+    }
+
+    context_lines: list[str] = []
+    reply_user_id = post.get("in_reply_to_user_id")
+    if reply_user_id:
+        reply_user = users.get(reply_user_id, {})
+        reply_username = reply_user.get("username")
+        if reply_username:
+            context_lines.append(f"回复对象：@{reply_username}")
+
+    for reference in post.get("referenced_tweets") or []:
+        if reference.get("type") not in {"replied_to", "quoted"}:
+            continue
+        parent = included_posts.get(reference.get("id"))
+        if parent:
+            label = "被回复原帖" if reference.get("type") == "replied_to" else "被引用原帖"
+            context_lines.append(f"{label}：{post_text(parent)}")
+
+    context = "\n".join(context_lines)
+    subject_preview = " ".join(content.split())
+    if len(subject_preview) > 60:
+        subject_preview = subject_preview[:57] + "..."
+    subject = f"[Tibo {kind}] {subject_preview or post['id']}"
+
+    text_parts = [
+        f"Tibo @{username}",
+        f"时间：{created_at}（北京时间）",
+        f"类型：{kind}",
+        "",
+        content,
+    ]
+    if context:
+        text_parts.extend(["", context])
+    text_parts.extend(["", f"原帖：{post_url}"])
+    text_body = "\n".join(text_parts)
+
+    html_parts = [
+        f"<p><strong>Tibo @{html.escape(username)}</strong><br>",
+        f"时间：{html.escape(created_at)}（北京时间）<br>",
+        f"类型：{html.escape(kind)}</p>",
+        f"<blockquote>{html.escape(content).replace(chr(10), '<br>')}</blockquote>",
+    ]
+    if context:
+        html_parts.append(
+            f"<p>{html.escape(context).replace(chr(10), '<br>')}</p>"
+        )
+    html_parts.append(
+        f'<p><a href="{html.escape(post_url)}">在 X 上打开原帖</a></p>'
+    )
+    return subject, text_body, "".join(html_parts)
+
+
+def run_monitor(
+    config: Config,
+    x_client: Any,
+    email_client: Any,
+    state_path: Path,
+) -> int:
+    state = load_state(state_path)
+    response = x_client.fetch_posts(config.target_username, state["last_seen_id"])
+    posts = response.get("data", [])
+    posts.sort(key=lambda post: int(post["id"]))
+
+    if not state["initialized"]:
+        newest_id = posts[-1]["id"] if posts else None
+        email_client.send(
+            subject=f"[Tibo Monitor] @{config.target_username} 监控已启用",
+            text=(
+                f"已开始监控 @{config.target_username} 的原创帖、回复和引用帖。\n"
+                "检查频率：每 30 分钟。\n"
+                "首次运行只建立基线，不发送历史帖子。"
+            ),
+            html_body=(
+                f"<p>已开始监控 <strong>@{html.escape(config.target_username)}</strong>"
+                " 的原创帖、回复和引用帖。</p>"
+                "<p>检查频率：每 30 分钟。首次运行只建立基线，不发送历史帖子。</p>"
+            ),
+            idempotency_key=f"tibo-monitor-init-{config.target_username}",
+        )
+        state = {"initialized": True, "last_seen_id": newest_id}
+        save_state(state_path, state)
+        print(f"Initialized monitor at post ID {newest_id or 'none'}.")
+        return 0
+
+    sent = 0
+    for post in posts:
+        subject, text_body, html_body = build_notification(
+            post, response.get("includes", {}), config.target_username
+        )
+        email_client.send(
+            subject=subject,
+            text=text_body,
+            html_body=html_body,
+            idempotency_key=f"tibo-post-{post['id']}",
+        )
+        state["last_seen_id"] = post["id"]
+        save_state(state_path, state)
+        sent += 1
+
+    print(f"Sent {sent} notification(s).")
+    return sent
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Monitor one X account and email new posts.")
+    parser.add_argument(
+        "--state",
+        type=Path,
+        default=DEFAULT_STATE_PATH,
+        help="Path to the persistent state JSON file.",
+    )
+    args = parser.parse_args()
+
+    try:
+        config = Config.from_env()
+        return_code = run_monitor(
+            config,
+            XClient(config.x_bearer_token),
+            ResendClient(config.resend_api_key, config.from_email, config.alert_email),
+            args.state,
+        )
+        return 0 if return_code >= 0 else 1
+    except Exception as exc:
+        print(f"Monitor failed: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
