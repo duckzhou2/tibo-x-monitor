@@ -28,7 +28,8 @@ jobs:
       - name: Check for new posts
         env:
           X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           TARGET_USERNAME: thsottiaux
         run: python monitor.py

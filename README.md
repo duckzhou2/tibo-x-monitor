@@ -2,7 +2,8 @@
 
 每 30 分钟检查一次公开账号
 [`@thsottiaux`](https://x.com/thsottiaux) 的原创帖、回复和引用帖，并通过
-Resend 发送邮件。项目使用 GitHub Actions 运行，因此本地电脑关机后仍可工作。
+Gmail、QQ 邮箱或其他支持 SSL SMTP 的个人邮箱发送通知。项目使用 GitHub
+Actions 运行，因此本地电脑关机后仍可工作。
 
 ## 行为
 
@@ -23,14 +24,27 @@ GitHub 定时任务可能因平台负载而延迟，因此通知目标是半小�
 | Secret | 内容 |
 | --- | --- |
 | `X_BEARER_TOKEN` | X Developer App 的只读 Bearer Token |
-| `RESEND_API_KEY` | Resend API Key |
+| `SMTP_USERNAME` | 发件邮箱完整地址，例如 `name@gmail.com` 或 `123456@qq.com` |
+| `SMTP_APP_PASSWORD` | Gmail 应用专用密码或 QQ 邮箱授权码，不是网页登录密码 |
 | `ALERT_EMAIL` | 接收通知的邮箱 |
 
 不要把这些值写入仓库、Issue、Actions 日志或聊天。
 
-默认发件人为 `Tibo Monitor <onboarding@resend.dev>`。Resend 的测试域名只能发给
-Resend 注册账号所使用的邮箱；若要发给其他地址，需要在 Resend 验证自己的域名，
-并通过 `ALERT_FROM` 环境变量指定发件人。
+### Gmail
+
+1. 为 Google 账号开启两步验证。
+2. 在 Google 账号安全设置中生成一个 16 位应用专用密码。
+3. `SMTP_USERNAME` 填完整 Gmail 地址，`SMTP_APP_PASSWORD` 填应用专用密码。
+
+### QQ 邮箱
+
+1. 登录 QQ 邮箱网页版，进入 **设置 → 账户**。
+2. 开启 **POP3/SMTP 服务**并生成授权码。
+3. `SMTP_USERNAME` 填完整 QQ 邮箱地址，`SMTP_APP_PASSWORD` 填授权码。
+
+程序会根据 `@gmail.com` 或 `@qq.com` 自动选择 `smtp.gmail.com:465` 或
+`smtp.qq.com:465`，并使用 SSL。其他邮箱可额外设置 `SMTP_HOST` 和
+`SMTP_PORT`。
 
 ## 验证
 

@@ -4,35 +4,41 @@ import argparse
 import html
 import json
 import os
+import smtplib
+import ssl
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.message import EmailMessage
+from email.utils import formataddr
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 
 X_API_BASE = "https://api.x.com/2"
-RESEND_API_URL = "https://api.resend.com/emails"
 DEFAULT_STATE_PATH = Path(__file__).with_name("state.json")
 
 
 @dataclass(frozen=True)
 class Config:
     x_bearer_token: str
-    resend_api_key: str
+    smtp_username: str
+    smtp_app_password: str
     alert_email: str
+    smtp_host: str
+    smtp_port: int = 465
     target_username: str = "thsottiaux"
-    from_email: str = "Tibo Monitor <onboarding@resend.dev>"
 
     @classmethod
     def from_env(cls) -> "Config":
         required = {
             "X_BEARER_TOKEN": os.environ.get("X_BEARER_TOKEN", "").strip(),
-            "RESEND_API_KEY": os.environ.get("RESEND_API_KEY", "").strip(),
+            "SMTP_USERNAME": os.environ.get("SMTP_USERNAME", "").strip(),
+            "SMTP_APP_PASSWORD": os.environ.get("SMTP_APP_PASSWORD", "").strip(),
             "ALERT_EMAIL": os.environ.get("ALERT_EMAIL", "").strip(),
         }
         missing = [name for name, value in required.items() if not value]
@@ -41,13 +47,31 @@ class Config:
 
         return cls(
             x_bearer_token=required["X_BEARER_TOKEN"],
-            resend_api_key=required["RESEND_API_KEY"],
+            smtp_username=required["SMTP_USERNAME"],
+            smtp_app_password=required["SMTP_APP_PASSWORD"],
             alert_email=required["ALERT_EMAIL"],
+            smtp_host=resolve_smtp_host(
+                required["SMTP_USERNAME"], os.environ.get("SMTP_HOST", "").strip()
+            ),
+            smtp_port=int(os.environ.get("SMTP_PORT", "465")),
             target_username=os.environ.get("TARGET_USERNAME", "thsottiaux").strip().lstrip("@"),
-            from_email=os.environ.get(
-                "ALERT_FROM", "Tibo Monitor <onboarding@resend.dev>"
-            ).strip(),
         )
+
+
+def resolve_smtp_host(username: str, configured_host: str = "") -> str:
+    if configured_host:
+        return configured_host
+    domain = username.rsplit("@", 1)[-1].lower()
+    hosts = {
+        "gmail.com": "smtp.gmail.com",
+        "googlemail.com": "smtp.gmail.com",
+        "qq.com": "smtp.qq.com",
+    }
+    if domain not in hosts:
+        raise ValueError(
+            "Cannot infer SMTP server. Set SMTP_HOST for this email provider."
+        )
+    return hosts[domain]
 
 
 def request_json(
@@ -137,10 +161,19 @@ class XClient:
         return result
 
 
-class ResendClient:
-    def __init__(self, api_key: str, from_email: str, to_email: str):
-        self._headers = {"Authorization": f"Bearer {api_key}"}
-        self._from_email = from_email
+class SMTPEmailClient:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        app_password: str,
+        to_email: str,
+    ):
+        self._host = host
+        self._port = port
+        self._username = username
+        self._app_password = app_password
         self._to_email = to_email
 
     def send(
@@ -151,22 +184,20 @@ class ResendClient:
         html_body: str,
         idempotency_key: str,
     ) -> None:
-        headers = dict(self._headers)
-        headers["Idempotency-Key"] = idempotency_key
-        response = request_json(
-            RESEND_API_URL,
-            method="POST",
-            headers=headers,
-            payload={
-                "from": self._from_email,
-                "to": [self._to_email],
-                "subject": subject,
-                "text": text,
-                "html": html_body,
-            },
-        )
-        if not response.get("id"):
-            raise RuntimeError(f"Resend did not return an email ID: {response}")
+        message = EmailMessage()
+        message["From"] = formataddr(("Tibo Monitor", self._username))
+        message["To"] = self._to_email
+        message["Subject"] = subject
+        message["Message-ID"] = f"<{idempotency_key}@tibo-monitor.local>"
+        message.set_content(text)
+        message.add_alternative(html_body, subtype="html")
+
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL(
+            self._host, self._port, timeout=30, context=context
+        ) as smtp:
+            smtp.login(self._username, self._app_password)
+            smtp.send_message(message)
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -344,7 +375,13 @@ def main() -> int:
         return_code = run_monitor(
             config,
             XClient(config.x_bearer_token),
-            ResendClient(config.resend_api_key, config.from_email, config.alert_email),
+            SMTPEmailClient(
+                config.smtp_host,
+                config.smtp_port,
+                config.smtp_username,
+                config.smtp_app_password,
+                config.alert_email,
+            ),
             args.state,
         )
         return 0 if return_code >= 0 else 1

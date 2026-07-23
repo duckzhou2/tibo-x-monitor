@@ -4,7 +4,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from monitor import Config, XClient, build_notification, classify_post, run_monitor
+from monitor import (
+    Config,
+    SMTPEmailClient,
+    XClient,
+    build_notification,
+    classify_post,
+    resolve_smtp_host,
+    run_monitor,
+)
 
 
 class FakeXClient:
@@ -28,8 +36,10 @@ class FakeEmailClient:
 def config():
     return Config(
         x_bearer_token="test-x-token",
-        resend_api_key="test-email-token",
+        smtp_username="sender@gmail.com",
+        smtp_app_password="test-app-password",
         alert_email="owner@example.com",
+        smtp_host="smtp.gmail.com",
     )
 
 
@@ -132,6 +142,38 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(request_json.call_count, 1)
         requested_url = request_json.call_args.args[0]
         self.assertIn("max_results=10", requested_url)
+
+    def test_resolves_gmail_and_qq_smtp_hosts(self):
+        self.assertEqual(resolve_smtp_host("sender@gmail.com"), "smtp.gmail.com")
+        self.assertEqual(resolve_smtp_host("123456@qq.com"), "smtp.qq.com")
+        self.assertEqual(
+            resolve_smtp_host("sender@example.com", "mail.example.com"),
+            "mail.example.com",
+        )
+
+    @patch("monitor.smtplib.SMTP_SSL")
+    def test_smtp_client_uses_app_password_and_ssl(self, smtp_ssl):
+        smtp = smtp_ssl.return_value.__enter__.return_value
+        client = SMTPEmailClient(
+            "smtp.gmail.com",
+            465,
+            "sender@gmail.com",
+            "app-password",
+            "recipient@example.com",
+        )
+
+        client.send(
+            subject="subject",
+            text="plain",
+            html_body="<p>html</p>",
+            idempotency_key="post-123",
+        )
+
+        smtp_ssl.assert_called_once()
+        smtp.login.assert_called_once_with("sender@gmail.com", "app-password")
+        message = smtp.send_message.call_args.args[0]
+        self.assertEqual(message["To"], "recipient@example.com")
+        self.assertEqual(message["Message-ID"], "<post-123@tibo-monitor.local>")
 
 
 if __name__ == "__main__":
