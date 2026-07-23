@@ -360,6 +360,30 @@ def run_monitor(
     return sent
 
 
+def send_sample(config: Config, x_client: Any, email_client: Any) -> str:
+    response = x_client.fetch_posts(config.target_username, None)
+    posts = response.get("data", [])
+    if not posts:
+        raise RuntimeError(f"No recent posts found for @{config.target_username}.")
+
+    post = max(posts, key=lambda item: int(item["id"]))
+    subject, text_body, html_body = build_notification(
+        post, response.get("includes", {}), config.target_username
+    )
+    sample_notice = "这是历史邮件范例，不代表检测到新帖。"
+    email_client.send(
+        subject=f"[历史示例] {subject}",
+        text=f"{sample_notice}\n\n{text_body}",
+        html_body=f"<p><strong>{sample_notice}</strong></p>{html_body}",
+        idempotency_key=(
+            f"tibo-sample-{post['id']}-"
+            f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        ),
+    )
+    print(f"Sent sample notification for post ID {post['id']}.")
+    return post["id"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Monitor one X account and email new posts.")
     parser.add_argument(
@@ -368,22 +392,28 @@ def main() -> int:
         default=DEFAULT_STATE_PATH,
         help="Path to the persistent state JSON file.",
     )
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Email the most recent post as a labeled example without changing state.",
+    )
     args = parser.parse_args()
 
     try:
         config = Config.from_env()
-        return_code = run_monitor(
-            config,
-            XClient(config.x_bearer_token),
-            SMTPEmailClient(
-                config.smtp_host,
-                config.smtp_port,
-                config.smtp_username,
-                config.smtp_app_password,
-                config.alert_email,
-            ),
-            args.state,
+        x_client = XClient(config.x_bearer_token)
+        email_client = SMTPEmailClient(
+            config.smtp_host,
+            config.smtp_port,
+            config.smtp_username,
+            config.smtp_app_password,
+            config.alert_email,
         )
+        if args.sample:
+            send_sample(config, x_client, email_client)
+            return 0
+
+        return_code = run_monitor(config, x_client, email_client, args.state)
         return 0 if return_code >= 0 else 1
     except Exception as exc:
         print(f"Monitor failed: {exc}", file=sys.stderr)

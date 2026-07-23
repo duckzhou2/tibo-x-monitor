@@ -12,6 +12,7 @@ from monitor import (
     classify_post,
     resolve_smtp_host,
     run_monitor,
+    send_sample,
 )
 
 
@@ -174,6 +175,23 @@ class MonitorTests(unittest.TestCase):
         message = smtp.send_message.call_args.args[0]
         self.assertEqual(message["To"], "recipient@example.com")
         self.assertEqual(message["Message-ID"], "<post-123@tibo-monitor.local>")
+
+    def test_sample_sends_latest_post_without_changing_state(self):
+        response = {
+            "data": [
+                {"id": "201", "text": "older sample"},
+                {"id": "202", "text": "latest sample"},
+            ]
+        }
+        email = FakeEmailClient()
+
+        sent_id = send_sample(config(), FakeXClient(response), email)
+
+        self.assertEqual(sent_id, "202")
+        self.assertEqual(len(email.messages), 1)
+        self.assertIn("[历史示例]", email.messages[0]["subject"])
+        self.assertIn("latest sample", email.messages[0]["text"])
+        self.assertIn("不代表检测到新帖", email.messages[0]["text"])
 
 
 if __name__ == "__main__":
