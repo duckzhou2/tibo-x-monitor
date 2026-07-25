@@ -9,6 +9,7 @@ from monitor import (
     SMTPEmailClient,
     XClient,
     build_notification,
+    build_digest,
     classify_post,
     resolve_smtp_host,
     run_monitor,
@@ -73,7 +74,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(email.messages), 1)
         self.assertIn("监控已启用", email.messages[0]["subject"])
 
-    def test_new_posts_are_emailed_oldest_first_and_state_advances(self):
+    def test_new_posts_are_combined_in_one_email_and_state_advances(self):
         response = {
             "data": [
                 {
@@ -107,11 +108,29 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(x_client.calls, [("thsottiaux", "100")])
         self.assertEqual(sent, 2)
-        self.assertIn("original text", email.messages[0]["subject"])
-        self.assertIn("[Tibo 回复]", email.messages[1]["subject"])
-        self.assertIn("回复对象：@someone", email.messages[1]["text"])
-        self.assertIn("被回复原帖：parent post", email.messages[1]["text"])
+        self.assertEqual(len(email.messages), 1)
+        self.assertEqual(email.messages[0]["subject"], "[Tibo 更新] 2 条新内容")
+        text = email.messages[0]["text"]
+        self.assertLess(text.find("original text"), text.find("reply text"))
+        self.assertIn("回复对象：@someone", text)
+        self.assertIn("被回复原帖：parent post", text)
         self.assertEqual(state["last_seen_id"], "102")
+
+    def test_digest_contains_each_post(self):
+        subject, text, html_body = build_digest(
+            [
+                {"id": "101", "text": "first", "created_at": "2026-07-24T05:00:00Z"},
+                {"id": "102", "text": "second", "created_at": "2026-07-24T06:00:00Z"},
+            ],
+            {},
+            "thsottiaux",
+        )
+
+        self.assertEqual(subject, "[Tibo 更新] 2 条新内容")
+        self.assertIn("--- 第 1 条 ---", text)
+        self.assertIn("--- 第 2 条 ---", text)
+        self.assertIn("first", text)
+        self.assertIn("second", html_body)
 
     def test_notification_uses_note_tweet_text_and_beijing_time(self):
         subject, text, html_body = build_notification(

@@ -309,6 +309,30 @@ def build_notification(
     return subject, text_body, "".join(html_parts)
 
 
+def build_digest(
+    posts: list[dict[str, Any]],
+    includes: dict[str, Any],
+    username: str,
+) -> tuple[str, str, str]:
+    count = len(posts)
+    text_parts = [f"本次检测到 {count} 条 Tibo @{username} 的新内容。"]
+    html_parts = [
+        f"<p>本次检测到 <strong>{count}</strong> 条 Tibo "
+        f"@{html.escape(username)} 的新内容。</p>"
+    ]
+
+    for index, post in enumerate(posts, start=1):
+        _, text_body, html_body = build_notification(post, includes, username)
+        text_parts.extend([f"\n--- 第 {index} 条 ---", text_body])
+        html_parts.append(f"<hr><h2>第 {index} 条</h2>{html_body}")
+
+    return (
+        f"[Tibo 更新] {count} 条新内容",
+        "\n".join(text_parts),
+        "".join(html_parts),
+    )
+
+
 def run_monitor(
     config: Config,
     x_client: Any,
@@ -341,23 +365,21 @@ def run_monitor(
         print(f"Initialized monitor at post ID {newest_id or 'none'}.")
         return 0
 
-    sent = 0
-    for post in posts:
-        subject, text_body, html_body = build_notification(
-            post, response.get("includes", {}), config.target_username
+    if posts:
+        subject, text_body, html_body = build_digest(
+            posts, response.get("includes", {}), config.target_username
         )
         email_client.send(
             subject=subject,
             text=text_body,
             html_body=html_body,
-            idempotency_key=f"tibo-post-{post['id']}",
+            idempotency_key=f"tibo-digest-{posts[-1]['id']}",
         )
-        state["last_seen_id"] = post["id"]
+        state["last_seen_id"] = posts[-1]["id"]
         save_state(state_path, state)
-        sent += 1
 
-    print(f"Sent {sent} notification(s).")
-    return sent
+    print(f"Sent one digest for {len(posts)} post(s).")
+    return len(posts)
 
 
 def main() -> int:
