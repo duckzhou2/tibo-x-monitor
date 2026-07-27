@@ -54,10 +54,13 @@ GitHub 定时任务可能因平台负载而延迟，因此通知目标是半小�
 python -m unittest discover -s tests -v
 ```
 
-配置三个 Secrets 后，在 GitHub 仓库的 **Actions → Monitor Tibo on X →
+配置四个 Secrets 后，在 GitHub 仓库的 **Actions → Monitor Tibo on X →
 Run workflow** 手动运行一次。首次成功应满足：
 
 1. 收到“监控已启用”邮件；
 2. Actions 运行状态为绿色；
 3. `state.json` 被 `github-actions[bot]` 更新；
 4. 后续运行只通知新的帖子。
+
+若只想查看邮件格式，可在手动运行时将 `mode` 选择为 `sample`。该模式发送最近
+一条历史内容并明确标注“历史示例”，不会读取或修改 `state.json`。
