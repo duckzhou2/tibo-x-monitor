@@ -28,7 +28,7 @@ class Config:
     x_bearer_token: str
     smtp_username: str
     smtp_app_password: str
-    alert_email: str
+    alert_emails: tuple[str, ...]
     smtp_host: str
     smtp_port: int = 465
     target_username: str = "thsottiaux"
@@ -49,7 +49,14 @@ class Config:
             x_bearer_token=required["X_BEARER_TOKEN"],
             smtp_username=required["SMTP_USERNAME"],
             smtp_app_password=required["SMTP_APP_PASSWORD"],
-            alert_email=required["ALERT_EMAIL"],
+            alert_emails=tuple(
+                email
+                for email in (
+                    required["ALERT_EMAIL"],
+                    os.environ.get("ADDITIONAL_ALERT_EMAIL", "").strip(),
+                )
+                if email
+            ),
             smtp_host=resolve_smtp_host(
                 required["SMTP_USERNAME"], os.environ.get("SMTP_HOST", "").strip()
             ),
@@ -168,13 +175,13 @@ class SMTPEmailClient:
         port: int,
         username: str,
         app_password: str,
-        to_email: str,
+        to_emails: tuple[str, ...],
     ):
         self._host = host
         self._port = port
         self._username = username
         self._app_password = app_password
-        self._to_email = to_email
+        self._to_emails = to_emails
 
     def send(
         self,
@@ -186,7 +193,7 @@ class SMTPEmailClient:
     ) -> None:
         message = EmailMessage()
         message["From"] = formataddr(("Tibo Monitor", self._username))
-        message["To"] = self._to_email
+        message["To"] = ", ".join(self._to_emails)
         message["Subject"] = subject
         message["Message-ID"] = f"<{idempotency_key}@tibo-monitor.local>"
         message.set_content(text)
@@ -402,7 +409,7 @@ def main() -> int:
                 config.smtp_port,
                 config.smtp_username,
                 config.smtp_app_password,
-                config.alert_email,
+                config.alert_emails,
             ),
             args.state,
         )

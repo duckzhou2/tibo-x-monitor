@@ -31,6 +31,7 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          ADDITIONAL_ALERT_EMAIL: ${{ secrets.ADDITIONAL_ALERT_EMAIL }}
           TARGET_USERNAME: thsottiaux
         run: python monitor.py
 

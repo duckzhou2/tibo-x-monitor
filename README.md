@@ -26,7 +26,8 @@ GitHub 定时任务可能因平台负载而延迟，因此通知目标是半小�
 | `X_BEARER_TOKEN` | X Developer App 的只读 Bearer Token |
 | `SMTP_USERNAME` | 发件邮箱完整地址，例如 `name@gmail.com` 或 `123456@qq.com` |
 | `SMTP_APP_PASSWORD` | Gmail 应用专用密码或 QQ 邮箱授权码，不是网页登录密码 |
-| `ALERT_EMAIL` | 接收通知的邮箱 |
+| `ALERT_EMAIL` | 主收件邮箱 |
+| `ADDITIONAL_ALERT_EMAIL` | 可选的第二个收件邮箱 |
 
 不要把这些值写入仓库、Issue、Actions 日志或聊天。
 
