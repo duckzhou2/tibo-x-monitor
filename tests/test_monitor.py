@@ -39,7 +39,7 @@ def config():
         x_bearer_token="test-x-token",
         smtp_username="sender@gmail.com",
         smtp_app_password="test-app-password",
-        alert_email="owner@example.com",
+        alert_emails=("owner@example.com",),
         smtp_host="smtp.gmail.com",
     )
 
@@ -178,7 +178,7 @@ class MonitorTests(unittest.TestCase):
             465,
             "sender@gmail.com",
             "app-password",
-            "recipient@example.com",
+            ("recipient@example.com", "second@example.com"),
         )
 
         client.send(
@@ -191,7 +191,7 @@ class MonitorTests(unittest.TestCase):
         smtp_ssl.assert_called_once()
         smtp.login.assert_called_once_with("sender@gmail.com", "app-password")
         message = smtp.send_message.call_args.args[0]
-        self.assertEqual(message["To"], "recipient@example.com")
+        self.assertEqual(message["To"], "recipient@example.com, second@example.com")
         self.assertEqual(message["Message-ID"], "<post-123@tibo-monitor.local>")
 
 
