@@ -32,6 +32,7 @@ jobs:
           SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           ADDITIONAL_ALERT_EMAIL: ${{ secrets.ADDITIONAL_ALERT_EMAIL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TARGET_USERNAME: thsottiaux
         run: python monitor.py
 

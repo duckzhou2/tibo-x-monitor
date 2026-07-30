@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from monitor import (
     Config,
+    DeepSeekTranslator,
     SMTPEmailClient,
     XClient,
     build_notification,
@@ -32,6 +33,16 @@ class FakeEmailClient:
 
     def send(self, **message):
         self.messages.append(message)
+
+
+class FakeTranslator:
+    def __init__(self, translation):
+        self.translation = translation
+        self.contents = []
+
+    def translate(self, content):
+        self.contents.append(content)
+        return self.translation
 
 
 def config():
@@ -133,6 +144,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("second", html_body)
 
     def test_notification_uses_note_tweet_text_and_beijing_time(self):
+        translator = FakeTranslator("完整的中文帖子")
         subject, text, html_body = build_notification(
             {
                 "id": "123",
@@ -142,11 +154,30 @@ class MonitorTests(unittest.TestCase):
             },
             {},
             "thsottiaux",
+            translator,
         )
 
         self.assertIn("complete long post", subject)
         self.assertIn("2026-07-24 14:30:00", text)
+        self.assertIn("中文翻译：\n完整的中文帖子", text)
         self.assertIn("https://x.com/thsottiaux/status/123", html_body)
+        self.assertEqual(translator.contents, ["complete long post"])
+
+    @patch("monitor.request_json")
+    def test_deepseek_translator_uses_chat_completions(self, request_json):
+        request_json.return_value = {
+            "choices": [{"message": {"content": "你好，世界"}}]
+        }
+
+        translation = DeepSeekTranslator("test-key").translate("Hello, world")
+
+        self.assertEqual(translation, "你好，世界")
+        self.assertEqual(request_json.call_args.args[0], "https://api.deepseek.com/chat/completions")
+        self.assertEqual(request_json.call_args.kwargs["method"], "POST")
+        self.assertEqual(
+            request_json.call_args.kwargs["headers"],
+            {"Authorization": "Bearer test-key"},
+        )
 
     @patch("monitor.request_json")
     def test_initial_x_lookup_reads_only_one_small_page(self, request_json):

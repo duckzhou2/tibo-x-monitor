@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 
 X_API_BASE = "https://api.x.com/2"
+DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEFAULT_STATE_PATH = Path(__file__).with_name("state.json")
 
 
@@ -30,6 +31,7 @@ class Config:
     smtp_app_password: str
     alert_emails: tuple[str, ...]
     smtp_host: str
+    deepseek_api_key: str = ""
     smtp_port: int = 465
     target_username: str = "thsottiaux"
 
@@ -60,6 +62,7 @@ class Config:
             smtp_host=resolve_smtp_host(
                 required["SMTP_USERNAME"], os.environ.get("SMTP_HOST", "").strip()
             ),
+            deepseek_api_key=os.environ.get("DEEPSEEK_API_KEY", "").strip(),
             smtp_port=int(os.environ.get("SMTP_PORT", "465")),
             target_username=os.environ.get("TARGET_USERNAME", "thsottiaux").strip().lstrip("@"),
         )
@@ -207,6 +210,37 @@ class SMTPEmailClient:
             smtp.send_message(message)
 
 
+class DeepSeekTranslator:
+    def __init__(self, api_key: str):
+        self._api_key = api_key
+
+    def translate(self, content: str) -> str:
+        response = request_json(
+            DEEPSEEK_API_URL,
+            method="POST",
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            payload={
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Translate the X post into Simplified Chinese. Preserve "
+                            "@mentions, hashtags, URLs, code, and line breaks. Return "
+                            "only the translation, without explanations."
+                        ),
+                    },
+                    {"role": "user", "content": content},
+                ],
+                "temperature": 0,
+            },
+        )
+        try:
+            return str(response["choices"][0]["message"]["content"]).strip()
+        except (IndexError, KeyError, TypeError) as exc:
+            raise RuntimeError("DeepSeek returned an unexpected translation response.") from exc
+
+
 def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"initialized": False, "last_seen_id": None}
@@ -250,14 +284,27 @@ def format_beijing_time(value: str | None) -> str:
     return parsed.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def translate_content(content: str, translator: Any | None) -> str | None:
+    if translator is None or not any(char.isascii() and char.isalpha() for char in content):
+        return None
+    try:
+        translation = str(translator.translate(content)).strip()
+    except Exception as exc:
+        print(f"Translation failed; sending original only: {exc}", file=sys.stderr)
+        return None
+    return translation if translation and translation != content.strip() else None
+
+
 def build_notification(
     post: dict[str, Any],
     includes: dict[str, Any],
     username: str,
+    translator: Any | None = None,
 ) -> tuple[str, str, str]:
     kind = classify_post(post)
     created_at = format_beijing_time(post.get("created_at"))
     content = post_text(post)
+    translation = translate_content(content, translator)
     post_url = f"https://x.com/{username}/status/{post['id']}"
 
     users = {user["id"]: user for user in includes.get("users", [])}
@@ -295,6 +342,8 @@ def build_notification(
         "",
         content,
     ]
+    if translation:
+        text_parts.extend(["", f"中文翻译：\n{translation}"])
     if context:
         text_parts.extend(["", context])
     text_parts.extend(["", f"原帖：{post_url}"])
@@ -306,6 +355,11 @@ def build_notification(
         f"类型：{html.escape(kind)}</p>",
         f"<blockquote>{html.escape(content).replace(chr(10), '<br>')}</blockquote>",
     ]
+    if translation:
+        html_parts.append(
+            "<p><strong>中文翻译：</strong><br>"
+            f"{html.escape(translation).replace(chr(10), '<br>')}</p>"
+        )
     if context:
         html_parts.append(
             f"<p>{html.escape(context).replace(chr(10), '<br>')}</p>"
@@ -320,6 +374,7 @@ def build_digest(
     posts: list[dict[str, Any]],
     includes: dict[str, Any],
     username: str,
+    translator: Any | None = None,
 ) -> tuple[str, str, str]:
     count = len(posts)
     text_parts = [f"本次检测到 {count} 条 Tibo @{username} 的新内容。"]
@@ -329,7 +384,9 @@ def build_digest(
     ]
 
     for index, post in enumerate(posts, start=1):
-        _, text_body, html_body = build_notification(post, includes, username)
+        _, text_body, html_body = build_notification(
+            post, includes, username, translator
+        )
         text_parts.extend([f"\n--- 第 {index} 条 ---", text_body])
         html_parts.append(f"<hr><h2>第 {index} 条</h2>{html_body}")
 
@@ -345,6 +402,7 @@ def run_monitor(
     x_client: Any,
     email_client: Any,
     state_path: Path,
+    translator: Any | None = None,
 ) -> int:
     state = load_state(state_path)
     response = x_client.fetch_posts(config.target_username, state["last_seen_id"])
@@ -374,7 +432,7 @@ def run_monitor(
 
     if posts:
         subject, text_body, html_body = build_digest(
-            posts, response.get("includes", {}), config.target_username
+            posts, response.get("includes", {}), config.target_username, translator
         )
         email_client.send(
             subject=subject,
@@ -412,6 +470,9 @@ def main() -> int:
                 config.alert_emails,
             ),
             args.state,
+            DeepSeekTranslator(config.deepseek_api_key)
+            if config.deepseek_api_key
+            else None,
         )
         return 0 if return_code >= 0 else 1
     except Exception as exc:
