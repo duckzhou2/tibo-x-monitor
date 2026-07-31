@@ -327,7 +327,13 @@ def build_notification(
         parent = included_posts.get(reference.get("id"))
         if parent:
             label = "被回复原帖" if reference.get("type") == "replied_to" else "被引用原帖"
-            context_lines.append(f"{label}：{post_text(parent)}")
+            parent_content = post_text(parent)
+            context_lines.append(f"{label}：{parent_content}")
+            parent_translation = translate_content(parent_content, translator)
+            if parent_translation:
+                context_lines.append(
+                    f"{label}中文翻译：\n{parent_translation}"
+                )
 
     context = "\n".join(context_lines)
     subject_preview = " ".join(content.split())
