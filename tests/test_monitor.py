@@ -42,6 +42,8 @@ class FakeTranslator:
 
     def translate(self, content):
         self.contents.append(content)
+        if isinstance(self.translation, dict):
+            return self.translation[content]
         return self.translation
 
 
@@ -162,6 +164,31 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("中文翻译：\n完整的中文帖子", text)
         self.assertIn("https://x.com/thsottiaux/status/123", html_body)
         self.assertEqual(translator.contents, ["complete long post"])
+
+    def test_reply_includes_translation_of_parent_post(self):
+        translator = FakeTranslator(
+            {"reply text": "回复中文", "parent post": "原帖中文"}
+        )
+        _, text, html_body = build_notification(
+            {
+                "id": "102",
+                "text": "reply text",
+                "in_reply_to_user_id": "9",
+                "referenced_tweets": [{"type": "replied_to", "id": "90"}],
+            },
+            {
+                "users": [{"id": "9", "username": "someone"}],
+                "tweets": [{"id": "90", "text": "parent post"}],
+            },
+            "thsottiaux",
+            translator,
+        )
+
+        self.assertIn("中文翻译：\n回复中文", text)
+        self.assertIn("被回复原帖：parent post", text)
+        self.assertIn("被回复原帖中文翻译：\n原帖中文", text)
+        self.assertIn("原帖中文", html_body)
+        self.assertEqual(translator.contents, ["reply text", "parent post"])
 
     @patch("monitor.request_json")
     def test_deepseek_translator_uses_chat_completions(self, request_json):
