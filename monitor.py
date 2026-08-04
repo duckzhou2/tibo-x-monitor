@@ -567,6 +567,42 @@ def send_sample(
     print(f"Sent translated sample for post ID {post['id']}.")
 
 
+def send_resend(
+    config: Config,
+    x_client: Any,
+    email_client: Any,
+    translator: Any | None,
+    since_id: str,
+    through_id: str,
+) -> None:
+    response = x_client.fetch_posts(config.target_username, since_id)
+    posts = [
+        post
+        for post in response.get("data", [])
+        if int(post["id"]) <= int(through_id)
+    ]
+    posts.sort(key=lambda post: int(post["id"]))
+    if not posts:
+        raise RuntimeError("No posts were found in the requested resend range.")
+
+    includes = response.get("includes", {})
+    subject, text_body, html_body = build_digest(
+        posts, includes, config.target_username, translator
+    )
+    sources = collect_translation_sources(posts, includes)
+    if text_body.count("中文翻译：") < len(sources):
+        raise RuntimeError("Translation is incomplete, so no resend email was sent.")
+    email_client.send(
+        subject=f"[重新翻译] {subject}",
+        text=("这是历史内容的重新翻译，不代表检测到新帖。\n\n" + text_body),
+        html_body=("<p>这是历史内容的重新翻译，不代表检测到新帖。</p>" + html_body),
+        idempotency_key=(
+            f"tibo-resend-{since_id}-{through_id}-{int(time.time())}"
+        ),
+    )
+    print(f"Resent {len(posts)} translated post(s).")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Monitor one X account and email new posts.")
     parser.add_argument(
@@ -579,6 +615,14 @@ def main() -> int:
         "--sample",
         action="store_true",
         help="Send one recent post as a translated sample without changing monitor state.",
+    )
+    parser.add_argument(
+        "--resend-since-id",
+        help="Exclusive lower post ID for a translated history resend.",
+    )
+    parser.add_argument(
+        "--resend-through-id",
+        help="Inclusive upper post ID for a translated history resend.",
     )
     args = parser.parse_args()
 
@@ -599,6 +643,20 @@ def main() -> int:
         )
         if args.sample:
             send_sample(config, x_client, email_client, translator)
+            return 0
+        if bool(args.resend_since_id) != bool(args.resend_through_id):
+            raise ValueError(
+                "Both --resend-since-id and --resend-through-id are required together."
+            )
+        if args.resend_since_id:
+            send_resend(
+                config,
+                x_client,
+                email_client,
+                translator,
+                args.resend_since_id,
+                args.resend_through_id,
+            )
             return 0
         return_code = run_monitor(config, x_client, email_client, args.state, translator)
         return 0 if return_code >= 0 else 1
