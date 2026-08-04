@@ -14,6 +14,7 @@ from monitor import (
     classify_post,
     resolve_smtp_host,
     run_monitor,
+    send_sample,
 )
 
 
@@ -45,6 +46,16 @@ class FakeTranslator:
         if isinstance(self.translation, dict):
             return self.translation[content]
         return self.translation
+
+
+class FakeBatchTranslator:
+    def __init__(self, translations):
+        self.translations = translations
+        self.contents = []
+
+    def translate_many(self, contents):
+        self.contents.append(contents)
+        return {content: self.translations[content] for content in contents}
 
 
 def config():
@@ -145,6 +156,27 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("first", text)
         self.assertIn("second", html_body)
 
+    def test_digest_batches_post_and_reply_context_translations(self):
+        translator = FakeBatchTranslator(
+            {"reply text": "回复中文", "parent post": "原帖中文"}
+        )
+        _, text, _ = build_digest(
+            [
+                {
+                    "id": "102",
+                    "text": "reply text",
+                    "referenced_tweets": [{"type": "replied_to", "id": "90"}],
+                }
+            ],
+            {"tweets": [{"id": "90", "text": "parent post"}]},
+            "thsottiaux",
+            translator,
+        )
+
+        self.assertEqual(translator.contents, [["reply text", "parent post"]])
+        self.assertIn("回复中文", text)
+        self.assertIn("原帖中文", text)
+
     def test_notification_uses_note_tweet_text_and_beijing_time(self):
         translator = FakeTranslator("完整的中文帖子")
         subject, text, html_body = build_notification(
@@ -193,18 +225,46 @@ class MonitorTests(unittest.TestCase):
     @patch("monitor.request_json")
     def test_deepseek_translator_uses_chat_completions(self, request_json):
         request_json.return_value = {
-            "choices": [{"message": {"content": "你好，世界"}}]
+            "choices": [{"message": {"content": '{"translations": ["你好，世界"]}'}}]
         }
 
-        translation = DeepSeekTranslator("test-key").translate("Hello, world")
+        translation = DeepSeekTranslator("test-key").translate_many(["Hello, world"])
 
-        self.assertEqual(translation, "你好，世界")
+        self.assertEqual(translation, {"Hello, world": "你好，世界"})
         self.assertEqual(request_json.call_args.args[0], "https://api.deepseek.com/chat/completions")
         self.assertEqual(request_json.call_args.kwargs["method"], "POST")
         self.assertEqual(
             request_json.call_args.kwargs["headers"],
             {"Authorization": "Bearer test-key"},
         )
+        self.assertEqual(request_json.call_args.kwargs["timeout"], 15)
+
+    @patch("monitor.time.sleep")
+    @patch("monitor.request_json")
+    def test_deepseek_translator_retries_timeout_once(self, request_json, sleep):
+        request_json.side_effect = [
+            TimeoutError("timed out"),
+            {"choices": [{"message": {"content": '{"translations": ["你好"]}'}}]},
+        ]
+
+        translation = DeepSeekTranslator("test-key").translate_many(["Hello"])
+
+        self.assertEqual(translation, {"Hello": "你好"})
+        self.assertEqual(request_json.call_count, 2)
+        sleep.assert_called_once_with(1)
+
+    def test_sample_sends_only_when_translation_is_available(self):
+        email = FakeEmailClient()
+        send_sample(
+            config(),
+            FakeXClient({"data": [{"id": "123", "text": "Hello, world"}]}),
+            email,
+            FakeBatchTranslator({"Hello, world": "你好，世界"}),
+        )
+
+        self.assertEqual(len(email.messages), 1)
+        self.assertIn("[翻译示例]", email.messages[0]["subject"])
+        self.assertIn("你好，世界", email.messages[0]["text"])
 
     @patch("monitor.request_json")
     def test_initial_x_lookup_reads_only_one_small_page(self, request_json):

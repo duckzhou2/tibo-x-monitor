@@ -7,6 +7,7 @@ import os
 import smtplib
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -215,26 +216,74 @@ class DeepSeekTranslator:
         self._api_key = api_key
 
     def translate(self, content: str) -> str:
-        response = request_json(
-            DEEPSEEK_API_URL,
-            method="POST",
-            headers={"Authorization": f"Bearer {self._api_key}"},
-            payload={
-                "model": "deepseek-chat",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Translate the X post into Simplified Chinese. Preserve "
-                            "@mentions, hashtags, URLs, code, and line breaks. Return "
-                            "only the translation, without explanations."
-                        ),
+        return self.translate_many([content])[content]
+
+    def translate_many(self, contents: list[str]) -> dict[str, str]:
+        unique_contents = list(dict.fromkeys(contents))
+        if not unique_contents:
+            return {}
+
+        for attempt in range(2):
+            try:
+                response = request_json(
+                    DEEPSEEK_API_URL,
+                    method="POST",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    payload={
+                        "model": "deepseek-chat",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Translate each X post into Simplified Chinese. Preserve "
+                                    "@mentions, hashtags, URLs, code, and line breaks. Return "
+                                    "only a JSON object with a translations array in the same "
+                                    "order as the input texts."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": json.dumps(
+                                    {"texts": unique_contents}, ensure_ascii=False
+                                ),
+                            },
+                        ],
+                        "temperature": 0,
                     },
-                    {"role": "user", "content": content},
-                ],
-                "temperature": 0,
-            },
-        )
+                    timeout=15,
+                )
+                raw_translation = str(
+                    response["choices"][0]["message"]["content"]
+                ).strip()
+                if raw_translation.startswith("```"):
+                    raw_translation = "\n".join(raw_translation.splitlines()[1:-1])
+                translations = json.loads(raw_translation)["translations"]
+                if not isinstance(translations, list) or len(translations) != len(unique_contents):
+                    raise ValueError("DeepSeek returned the wrong number of translations.")
+                return {
+                    content: str(translation).strip()
+                    for content, translation in zip(unique_contents, translations)
+                }
+            except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                error = RuntimeError("DeepSeek returned an unexpected translation response.")
+                error.__cause__ = exc
+            except (RuntimeError, TimeoutError, OSError) as exc:
+                error = exc
+
+            if attempt == 1:
+                raise error
+            print(f"Translation attempt failed; retrying once: {error}", file=sys.stderr)
+            time.sleep(1)
+
+        raise AssertionError("Unreachable")
+
+
+class CachedTranslator:
+    def __init__(self, translations: dict[str, str]):
+        self._translations = translations
+
+    def translate(self, content: str) -> str:
+        return self._translations.get(content, "")
         try:
             return str(response["choices"][0]["message"]["content"]).strip()
         except (IndexError, KeyError, TypeError) as exc:
@@ -293,6 +342,44 @@ def translate_content(content: str, translator: Any | None) -> str | None:
         print(f"Translation failed; sending original only: {exc}", file=sys.stderr)
         return None
     return translation if translation and translation != content.strip() else None
+
+
+def collect_translation_sources(
+    posts: list[dict[str, Any]], includes: dict[str, Any]
+) -> list[str]:
+    included_posts = {
+        included_post["id"]: included_post
+        for included_post in includes.get("tweets", [])
+    }
+    sources: list[str] = []
+    for post in posts:
+        sources.append(post_text(post))
+        for reference in post.get("referenced_tweets") or []:
+            if reference.get("type") not in {"replied_to", "quoted"}:
+                continue
+            parent = included_posts.get(reference.get("id"))
+            if parent:
+                sources.append(post_text(parent))
+    return list(
+        dict.fromkeys(
+            source
+            for source in sources
+            if any(char.isascii() and char.isalpha() for char in source)
+        )
+    )
+
+
+def prepare_translator(
+    posts: list[dict[str, Any]], includes: dict[str, Any], translator: Any | None
+) -> Any | None:
+    translate_many = getattr(translator, "translate_many", None)
+    if not callable(translate_many):
+        return translator
+    try:
+        return CachedTranslator(translate_many(collect_translation_sources(posts, includes)))
+    except Exception as exc:
+        print(f"Translation failed; sending original only: {exc}", file=sys.stderr)
+        return None
 
 
 def build_notification(
@@ -383,6 +470,7 @@ def build_digest(
     translator: Any | None = None,
 ) -> tuple[str, str, str]:
     count = len(posts)
+    prepared_translator = prepare_translator(posts, includes, translator)
     text_parts = [f"本次检测到 {count} 条 Tibo @{username} 的新内容。"]
     html_parts = [
         f"<p>本次检测到 <strong>{count}</strong> 条 Tibo "
@@ -391,7 +479,7 @@ def build_digest(
 
     for index, post in enumerate(posts, start=1):
         _, text_body, html_body = build_notification(
-            post, includes, username, translator
+            post, includes, username, prepared_translator
         )
         text_parts.extend([f"\n--- 第 {index} 条 ---", text_body])
         html_parts.append(f"<hr><h2>第 {index} 条</h2>{html_body}")
@@ -453,6 +541,32 @@ def run_monitor(
     return len(posts)
 
 
+def send_sample(
+    config: Config,
+    x_client: Any,
+    email_client: Any,
+    translator: Any | None,
+) -> None:
+    response = x_client.fetch_posts(config.target_username, None)
+    posts = response.get("data", [])
+    if not posts:
+        raise RuntimeError("No recent Tibo posts are available for a sample email.")
+    posts.sort(key=lambda post: int(post["id"]))
+    post = posts[-1]
+    subject, text_body, html_body = build_digest(
+        [post], response.get("includes", {}), config.target_username, translator
+    )
+    if collect_translation_sources([post], response.get("includes", {})) and "中文翻译：" not in text_body:
+        raise RuntimeError("Translation is unavailable, so no sample email was sent.")
+    email_client.send(
+        subject=f"[翻译示例] {subject}",
+        text=("这是翻译功能示例，不代表检测到新帖。\n\n" + text_body),
+        html_body=("<p>这是翻译功能示例，不代表检测到新帖。</p>" + html_body),
+        idempotency_key=f"tibo-sample-{post['id']}-{int(time.time())}",
+    )
+    print(f"Sent translated sample for post ID {post['id']}.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Monitor one X account and email new posts.")
     parser.add_argument(
@@ -461,25 +575,32 @@ def main() -> int:
         default=DEFAULT_STATE_PATH,
         help="Path to the persistent state JSON file.",
     )
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Send one recent post as a translated sample without changing monitor state.",
+    )
     args = parser.parse_args()
 
     try:
         config = Config.from_env()
-        return_code = run_monitor(
-            config,
-            XClient(config.x_bearer_token),
-            SMTPEmailClient(
-                config.smtp_host,
-                config.smtp_port,
-                config.smtp_username,
-                config.smtp_app_password,
-                config.alert_emails,
-            ),
-            args.state,
+        x_client = XClient(config.x_bearer_token)
+        email_client = SMTPEmailClient(
+            config.smtp_host,
+            config.smtp_port,
+            config.smtp_username,
+            config.smtp_app_password,
+            config.alert_emails,
+        )
+        translator = (
             DeepSeekTranslator(config.deepseek_api_key)
             if config.deepseek_api_key
-            else None,
+            else None
         )
+        if args.sample:
+            send_sample(config, x_client, email_client, translator)
+            return 0
+        return_code = run_monitor(config, x_client, email_client, args.state, translator)
         return 0 if return_code >= 0 else 1
     except Exception as exc:
         print(f"Monitor failed: {exc}", file=sys.stderr)

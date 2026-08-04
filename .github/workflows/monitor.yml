@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: "7,37 * * * *"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run normal monitoring or send a translated sample"
+        required: true
+        default: monitor
+        type: choice
+        options:
+          - monitor
+          - sample
 
 permissions:
   contents: write
@@ -34,7 +43,12 @@ jobs:
           ADDITIONAL_ALERT_EMAIL: ${{ secrets.ADDITIONAL_ALERT_EMAIL }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TARGET_USERNAME: thsottiaux
-        run: python monitor.py
+        run: |
+          if [ "${{ inputs.mode }}" = "sample" ]; then
+            python monitor.py --sample
+          else
+            python monitor.py
+          fi
 
       - name: Persist monitor state
         if: always()
