@@ -14,6 +14,7 @@ from monitor import (
     classify_post,
     resolve_smtp_host,
     run_monitor,
+    send_resend,
     send_sample,
 )
 
@@ -265,6 +266,33 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(email.messages), 1)
         self.assertIn("[翻译示例]", email.messages[0]["subject"])
         self.assertIn("你好，世界", email.messages[0]["text"])
+
+    def test_resend_uses_only_the_requested_post_id_range(self):
+        email = FakeEmailClient()
+        send_resend(
+            config(),
+            FakeXClient(
+                {
+                    "data": [
+                        {"id": "103", "text": "third"},
+                        {"id": "101", "text": "first"},
+                        {"id": "102", "text": "second"},
+                    ]
+                }
+            ),
+            email,
+            FakeBatchTranslator(
+                {"first": "第一", "second": "第二", "third": "第三"}
+            ),
+            "100",
+            "102",
+        )
+
+        self.assertEqual(len(email.messages), 1)
+        self.assertEqual(email.messages[0]["subject"], "[重新翻译] [Tibo 更新] 2 条新内容")
+        self.assertIn("first", email.messages[0]["text"])
+        self.assertIn("second", email.messages[0]["text"])
+        self.assertNotIn("third", email.messages[0]["text"])
 
     @patch("monitor.request_json")
     def test_initial_x_lookup_reads_only_one_small_page(self, request_json):
