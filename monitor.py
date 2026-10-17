@@ -57,6 +57,7 @@ class Config:
                 for email in (
                     required["ALERT_EMAIL"],
                     os.environ.get("ADDITIONAL_ALERT_EMAIL", "").strip(),
+                    os.environ.get("THIRD_ALERT_EMAIL", "").strip(),
                 )
                 if email
             ),

@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,6 +71,23 @@ def config():
 
 
 class MonitorTests(unittest.TestCase):
+    def test_config_preserves_existing_recipients_and_adds_third(self):
+        with patch.dict(os.environ, {
+            "X_BEARER_TOKEN": "test-token",
+            "SMTP_USERNAME": "sender@gmail.com",
+            "SMTP_APP_PASSWORD": "test-password",
+            "ALERT_EMAIL": "owner@example.com",
+            "ADDITIONAL_ALERT_EMAIL": "second@example.com",
+            "THIRD_ALERT_EMAIL": " third@example.com ",
+        }, clear=True):
+            self.assertEqual(Config.from_env().alert_emails, (
+                "owner@example.com", "second@example.com", "third@example.com",
+            ))
+            del os.environ["THIRD_ALERT_EMAIL"]
+            self.assertEqual(Config.from_env().alert_emails, (
+                "owner@example.com", "second@example.com",
+            ))
+
     def test_classifies_original_reply_and_quote(self):
         self.assertEqual(classify_post({"id": "1"}), "原创")
         self.assertEqual(

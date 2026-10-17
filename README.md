@@ -30,6 +30,7 @@ GitHub 定时任务可能因平台负载而延迟，因此通知目标是半小�
 | `SMTP_APP_PASSWORD` | Gmail 应用专用密码或 QQ 邮箱授权码，不是网页登录密码 |
 | `ALERT_EMAIL` | 主收件邮箱 |
 | `ADDITIONAL_ALERT_EMAIL` | 可选的第二个收件邮箱 |
+| `THIRD_ALERT_EMAIL` | 可选的第三个收件邮箱 |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key，用于英文帖子翻译 |
 
 不要把这些值写入仓库、Issue、Actions 日志或聊天。
