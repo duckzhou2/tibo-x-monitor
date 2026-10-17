@@ -14,6 +14,7 @@ on:
           - monitor
           - sample
           - resend
+          - test-email
       resend_since_id:
         description: "Exclusive lower post ID for a resend"
         required: false
@@ -54,7 +55,26 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TARGET_USERNAME: thsottiaux
         run: |
-          if [ "${{ inputs.mode }}" = "sample" ]; then
+          if [ "${{ inputs.mode }}" = "test-email" ]; then
+            python - <<'PY'
+          import os
+          import uuid
+          from monitor import Config, SMTPEmailClient
+
+          config = Config.from_env()
+          recipient = os.environ["THIRD_ALERT_EMAIL"].strip()
+          if not recipient:
+              raise ValueError("THIRD_ALERT_EMAIL is required for the email test.")
+          client = SMTPEmailClient(config.smtp_host, config.smtp_port,
+                                   config.smtp_username, config.smtp_app_password,
+                                   (recipient,))
+          client.send(subject="[Tibo Monitor] Test 邮件",
+                      text="这是一封 Tibo 监控测试邮件。你的邮箱已加入收件人列表，今后有新内容时会收到通知。",
+                      html_body="<p>这是一封 Tibo 监控测试邮件。你的邮箱已加入收件人列表，今后有新内容时会收到通知。</p>",
+                      idempotency_key=f"test-{uuid.uuid4()}")
+          print("Test email accepted by SMTP server.")
+          PY
+          elif [ "${{ inputs.mode }}" = "sample" ]; then
             python monitor.py --sample
           elif [ "${{ inputs.mode }}" = "resend" ]; then
             python monitor.py \
