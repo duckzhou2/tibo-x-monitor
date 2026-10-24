@@ -24,8 +24,8 @@ def page(ids=(), **extra):
     }
 
 
-def completion(items):
-    return {"choices": [{"message": {"content": json.dumps({"translations": items})}}]}
+def completion(items, finish_reason="stop"):
+    return {"choices": [{"finish_reason": finish_reason, "message": {"content": json.dumps({"translations": items})}}]}
 
 
 def translated(source, text="中文译文"):
@@ -247,8 +247,79 @@ class TranslationTests(OfflineTests):
         self.assertEqual(result, {"first": "第一", "second": "第二"})
 
     def test_missing_array_or_invalid_content_rejected(self):
-        for response in [{}, {"choices": []}, {"choices": [{"message": {"content": None}}]}, {"choices": [{"message": {"content": "{}"}}]}]:
+        for response in [{}, {"choices": []}, {"choices": [{"finish_reason": "stop", "message": {"content": None}}]}, {"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]}]:
             self.assertEqual(self.translate([response] * 2, ["English"])[0], {})
+
+    def test_nonstop_or_missing_finish_reason_rejects_even_valid_json(self):
+        for reason in ["length", "content_filter", "tool_calls", "insufficient_system_resource", None]:
+            response = completion([translated("English")], finish_reason=reason)
+            if reason is None:
+                del response["choices"][0]["finish_reason"]
+            with self.subTest(reason=reason):
+                result, request = self.translate([response] * 2, ["English"])
+                self.assertEqual(result, {})
+                self.assertEqual(request.call_count, 2)
+
+    def test_truncated_completion_can_recover_on_retry(self):
+        result, request = self.translate([
+            completion([translated("English", "不能采用的截断结果")], finish_reason="length"),
+            completion([translated("English", "完整译文")]),
+        ], ["English"])
+        self.assertEqual(result, {"English": "完整译文"})
+        self.assertEqual(request.call_count, 2)
+
+    def test_prior_success_survives_truncated_retry_for_other_source(self):
+        result, _ = self.translate([
+            completion([translated("first", "第一译文")]),
+            completion([translated("second", "不能采用的截断结果")], finish_reason="length"),
+        ], ["first", "second"])
+        self.assertEqual(result, {"first": "第一译文"})
+
+    def test_translation_timeout_is_clamped_to_remaining_shared_budget(self):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = json.dumps(completion([translated("English")])).encode("utf-8")
+        with patch("monitor.time.monotonic", return_value=100), patch("monitor.urllib.request.urlopen", return_value=response) as request:
+            result = m.DeepSeekTranslator("fixture", m.Deadline(5)).translate_many(["English"])
+        self.assertEqual(result, {"English": "中文译文"})
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(request.call_args.kwargs["timeout"], 5)
+
+    def test_invalid_truncated_and_empty_json_fall_back_without_losing_notification(self):
+        invalid_bodies = ["", "   ", "not json", '{"translations": [', "{}", "null"]
+        responses = [
+            {"choices": [{"finish_reason": "stop", "message": {"content": body}}]}
+            for body in invalid_bodies
+        ]
+        responses.append(completion([translated("English 101")], finish_reason="length"))
+        for response in responses:
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                path.write_text('{"initialized":true,"last_seen_id":"100"}', encoding="utf-8")
+                report = m.RunReport()
+                email = FakeEmailClient()
+                with patch("monitor.request_json", return_value=response) as request, patch("monitor.time.sleep"):
+                    m.run_monitor(config(), FakeXClient(page([101])), email, path, m.DeepSeekTranslator("fixture"), report)
+                self.assertEqual(request.call_count, 2)
+                self.assertEqual(len(email.messages), 1)
+                self.assertIn("English 101", email.messages[0]["text"])
+                self.assertIn("中文翻译失败，已保留英文原文", email.messages[0]["text"])
+                self.assertEqual(m.load_state(path)["last_seen_id"], "101")
+                self.assertEqual((report.translation_success, report.translation_failed), (0, 1))
+                self.assertIn("TRANSLATION_FALLBACK", report.status)
+
+    def test_upper_bound_batch_retains_sources_and_has_explicit_output_budget(self):
+        sources = [f"English {i}: " + "a" * (500 - len(f"English {i}: ")) for i in range(12)]
+        self.assertEqual(sum(map(len, sources)), 6000)
+        result, request = self.translate([completion([translated(source) for source in sources])], sources)
+        self.assertEqual(len(result), 12)
+        self.assertEqual(request.call_count, 1)
+        payload = request.call_args.kwargs["payload"]
+        entries = json.loads(payload["messages"][1]["content"])["sources"]
+        self.assertEqual([entry["source"] for entry in entries], sources)
+        self.assertEqual(payload["max_tokens"], 16384)
+        self.assertEqual(request.call_args.kwargs["timeout"], 30)
 
     def test_key_missing_is_explicit(self):
         _, text, html = m.build_digest([{"id": "101", "text": "English"}], {}, "thsottiaux")

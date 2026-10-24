@@ -20,7 +20,11 @@
 
 ## 翻译与英文回退
 
-DeepSeek 对主帖及可用上下文按去重文本分批翻译：每批最多 12 项、合计 6000 字符，每批最多两次尝试；第二次仅重试未完成项，保留成功译文。单项超过字符上限时完整保留原文并明确回退，不截断帖子。单次请求超时最多 15 秒，仍受共享预算约束。
+使用 `deepseek-flash`，通过 Chat Completions 显式设置 `thinking: {"type":"disabled"}` 和 `response_format: {"type":"json_object"}`，避免日常翻译启用思考模式。参考：[模型与版本](https://api-docs.deepseek.com/quick_start/pricing/)、[非思考模式](https://api-docs.deepseek.com/guides/thinking_mode/)。
+
+对主帖及可用上下文按去重文本分批翻译：每批最多 12 项、合计 6000 字符，每批最多两次尝试；第二次仅重试未完成项，保留成功译文。单项超过字符上限时完整保留原文并明确回退，不截断帖子。保留此批次上限以限制原文回显、译文和 JSON 的输出体积，显式设置 `max_tokens=16384` 留出余量，单次超时从 15 秒调整为 30 秒，仍受共享 150 秒业务预算和 5 分钟 Job 上限约束。这些是保守工程预算，未通过付费请求验证延迟，不保证所有文本均能在预算内翻译。
+
+只有 `finish_reason="stop"` 的响应进入逐项校验；`length` 等异常结束、缺失结束原因、空或无效 JSON 会有限重试，仍失败则明确英文回退。即使正文恰好能解析为完整 JSON，也不把 `length` 标记的结果当作完整译文。字符数不等于 Token 数，较长文本仍可能截断或超时；完整英文通知不受影响。参考：[JSON Output](https://api-docs.deepseek.com/guides/json_mode/)、[Chat Completions 参数和结束原因](https://api-docs.deepseek.com/api/create-chat-completion/)。
 
 使用文本 SHA-256 来源 ID 和原文回显映射，顺序变化不会错配。拒绝空串、null、非字符串、缺项、重复 ID、未知来源、原文不匹配和明显未译结果，并检查 URL、@mention、标签及行内代码是否保留。结构校验不能证明模型语义翻译准确。
 

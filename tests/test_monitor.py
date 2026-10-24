@@ -251,7 +251,7 @@ class MonitorTests(unittest.TestCase):
     @patch("monitor.request_json")
     def test_deepseek_translator_uses_chat_completions(self, request_json):
         request_json.return_value = {
-            "choices": [{"message": {"content": json.dumps({"translations": [{"id": DeepSeekTranslator.source_id("Hello, world"), "source": "Hello, world", "text": "你好，世界"}]})}}]
+            "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"translations": [{"id": DeepSeekTranslator.source_id("Hello, world"), "source": "Hello, world", "text": "你好，世界"}]})}}]
         }
 
         translation = DeepSeekTranslator("test-key").translate_many(["Hello, world"])
@@ -263,14 +263,20 @@ class MonitorTests(unittest.TestCase):
             request_json.call_args.kwargs["headers"],
             {"Authorization": "Bearer test-key"},
         )
-        self.assertEqual(request_json.call_args.kwargs["timeout"], 15)
+        payload = request_json.call_args.kwargs["payload"]
+        self.assertEqual(payload["model"], "deepseek-flash")
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_tokens"], 16384)
+        self.assertIn("JSON", payload["messages"][0]["content"])
+        self.assertEqual(request_json.call_args.kwargs["timeout"], 30)
 
     @patch("monitor.time.sleep")
     @patch("monitor.request_json")
     def test_deepseek_translator_retries_timeout_once(self, request_json, sleep):
         request_json.side_effect = [
             TimeoutError("timed out"),
-            {"choices": [{"message": {"content": json.dumps({"translations": [{"id": DeepSeekTranslator.source_id("Hello"), "source": "Hello", "text": "你好"}]})}}]},
+            {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"translations": [{"id": DeepSeekTranslator.source_id("Hello"), "source": "Hello", "text": "你好"}]})}}]},
         ]
 
         translation = DeepSeekTranslator("test-key").translate_many(["Hello"])
