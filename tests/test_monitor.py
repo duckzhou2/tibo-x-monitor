@@ -25,7 +25,7 @@ class FakeXClient:
         self.response = response
         self.calls = []
 
-    def fetch_posts(self, username, since_id):
+    def fetch_posts(self, username, since_id, **kwargs):
         self.calls.append((username, since_id))
         return self.response
 
@@ -71,6 +71,11 @@ def config():
 
 
 class MonitorTests(unittest.TestCase):
+    def setUp(self):
+        guard = patch("socket.create_connection", side_effect=AssertionError("Real network forbidden in tests"))
+        guard.start()
+        self.addCleanup(guard.stop)
+
     def test_config_preserves_existing_recipients_and_adds_third(self):
         with patch.dict(os.environ, {
             "X_BEARER_TOKEN": "test-token",
@@ -110,10 +115,12 @@ class MonitorTests(unittest.TestCase):
         email = FakeEmailClient()
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "state.json"
-            run_monitor(config(), FakeXClient(response), email, state_path)
+            run_monitor(config(), FakeXClient(response), email, state_path, initialize=True)
             state = json.loads(state_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(state, {"initialized": True, "last_seen_id": "102"})
+        self.assertTrue(state["initialized"])
+        self.assertEqual(state["last_seen_id"], "102")
+        self.assertIn("last_checked_at", state)
         self.assertEqual(len(email.messages), 1)
         self.assertIn("监控已启用", email.messages[0]["subject"])
 
@@ -244,7 +251,7 @@ class MonitorTests(unittest.TestCase):
     @patch("monitor.request_json")
     def test_deepseek_translator_uses_chat_completions(self, request_json):
         request_json.return_value = {
-            "choices": [{"message": {"content": '{"translations": ["你好，世界"]}'}}]
+            "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"translations": [{"id": DeepSeekTranslator.source_id("Hello, world"), "source": "Hello, world", "text": "你好，世界"}]})}}]
         }
 
         translation = DeepSeekTranslator("test-key").translate_many(["Hello, world"])
@@ -256,14 +263,20 @@ class MonitorTests(unittest.TestCase):
             request_json.call_args.kwargs["headers"],
             {"Authorization": "Bearer test-key"},
         )
-        self.assertEqual(request_json.call_args.kwargs["timeout"], 15)
+        payload = request_json.call_args.kwargs["payload"]
+        self.assertEqual(payload["model"], "deepseek-flash")
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_tokens"], 16384)
+        self.assertIn("JSON", payload["messages"][0]["content"])
+        self.assertEqual(request_json.call_args.kwargs["timeout"], 30)
 
     @patch("monitor.time.sleep")
     @patch("monitor.request_json")
     def test_deepseek_translator_retries_timeout_once(self, request_json, sleep):
         request_json.side_effect = [
             TimeoutError("timed out"),
-            {"choices": [{"message": {"content": '{"translations": ["你好"]}'}}]},
+            {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"translations": [{"id": DeepSeekTranslator.source_id("Hello"), "source": "Hello", "text": "你好"}]})}}]},
         ]
 
         translation = DeepSeekTranslator("test-key").translate_many(["Hello"])
@@ -272,7 +285,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(request_json.call_count, 2)
         sleep.assert_called_once_with(1)
 
-    def test_sample_sends_only_when_translation_is_available(self):
+    def test_sample_sends_available_translation(self):
         email = FakeEmailClient()
         send_sample(
             config(),
@@ -316,10 +329,10 @@ class MonitorTests(unittest.TestCase):
     def test_initial_x_lookup_reads_only_one_small_page(self, request_json):
         request_json.return_value = {
             "data": [{"id": "123", "text": "latest"}],
-            "meta": {"next_token": "unused-token"},
+            "meta": {"result_count": 1, "next_token": "unused-token"},
         }
 
-        response = XClient("token").fetch_posts("thsottiaux", None)
+        response = XClient("token").fetch_posts("thsottiaux", None, baseline=True)
 
         self.assertEqual([post["id"] for post in response["data"]], ["123"])
         self.assertEqual(request_json.call_count, 1)
@@ -337,6 +350,7 @@ class MonitorTests(unittest.TestCase):
     @patch("monitor.smtplib.SMTP_SSL")
     def test_smtp_client_uses_app_password_and_ssl(self, smtp_ssl):
         smtp = smtp_ssl.return_value.__enter__.return_value
+        smtp.send_message.return_value = {}
         client = SMTPEmailClient(
             "smtp.gmail.com",
             465,
