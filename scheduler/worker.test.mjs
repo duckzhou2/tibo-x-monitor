@@ -141,12 +141,14 @@ test("known fetch runtime errors differ from network failures without exposing m
 });
 
 test("network TypeError is not automatically labeled a runtime argument error", async () => {
-  await assert.rejects(dispatch(env, async () => { throw new TypeError("fetch failed: fixture credentials"); }), (error) => {
-    assert.equal(error.message, "NETWORK_ERROR");
-    assert.equal(error.diagnostic.exception_name, "TypeError");
-    assert.equal(JSON.stringify(error).includes("fixture credentials"), false);
-    return true;
-  });
+  for (const message of ["fetch failed: fixture credentials", "fetch failed at https://redirect.example.invalid", "TLS unsupported cipher"]) {
+    await assert.rejects(dispatch(env, async () => { throw new TypeError(message); }), (error) => {
+      assert.equal(error.message, "NETWORK_ERROR");
+      assert.equal(error.diagnostic.exception_name, "TypeError");
+      assert.equal(JSON.stringify(error).includes(message), false);
+      return true;
+    });
+  }
 });
 
 test("AbortSignal construction failures are classified without starting a request", async () => {

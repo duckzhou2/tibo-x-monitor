@@ -36,7 +36,7 @@ export async function dispatch(env, fetcher = fetch) {
     const timeout = signal?.aborted || error?.name === "TimeoutError" || error?.name === "AbortError";
     // Inspect only for known runtime signatures; never emit upstream messages or stacks.
     const runtimeError = ["ReferenceError", "RangeError"].includes(error?.name)
-      || (error?.name === "TypeError" && /redirect|illegal invocation|not implemented|unsupported|not a function/i.test(String(error?.message ?? "")));
+      || (error?.name === "TypeError" && /(?:unsupported|invalid).*redirect|illegal invocation|(?:AbortSignal\.timeout|fetch).*not a function/i.test(String(error?.message ?? "")));
     throw failure(timeout ? "REQUEST_TIMEOUT" : runtimeError ? "FETCH_RUNTIME_ERROR" : "NETWORK_ERROR", diagnostic);
   }
   diagnostic.elapsed_ms = Date.now() - started;
