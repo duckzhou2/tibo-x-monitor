@@ -1,8 +1,16 @@
-# 可选外部调度（当前未部署、未启用）
+# 可选外部调度
 
 唯一用途：Cloudflare Workers Cron Trigger → GitHub Workflow Dispatch → main 的既有 monitor 模式。Worker 不读取 X/DeepSeek/SMTP 凭据，不执行监控或保存游标，也没有公开 HTTP 触发入口。
 
 wrangler.toml 的 crons=[]、ENABLED=false 是刻意保留的停用配置；R1 不改变 GitHub 原生 cron。请求超时 10 秒，接受当前 API 的 HTTP 200 及旧版 204，其他状态及网络异常明确失败，不输出响应正文。POST 不自动重试，避免接受后丢失响应引起即时重复；下个 Cron 再尝试。HTTP 接受不证明监控 job 成功或邮件送达。
+
+## 请求兼容性与故障诊断
+
+Cloudflare Workers 不支持 `redirect: "error"`，会在发出 HTTP 请求前抛出 TypeError。使用 `manual` 并仅接受 200/204；3xx 明确失败，不跟随 Location，避免将认证信息发送到重定向目标。参见官方 [Request 文档](https://developers.cloudflare.com/workers/runtime-apis/request/)。R3-D 同一 Worker 的远端预览 GET 对照：error 模式在 0ms 内失败，manual 模式返回 GitHub 200；保持 AbortSignal.timeout(10000)、User-Agent 和 API 版本不变。
+
+每次 scheduled 执行都记录 scheduled_at、observed_at、elapsed_ms、http_status、exception_name、aborted 和 status。状态包括 REQUEST_TIMEOUT、NETWORK_ERROR、FETCH_RUNTIME_ERROR、DISPATCH_HTTP_4XX、DISPATCH_HTTP_5XX、DISPATCH_HTTP_UNEXPECTED、DISPATCH_ACCEPTED；未配置 Secret 明确为 DISPATCH_TOKEN_MISSING。异常名称使用固定白名单，不输出上游异常信息、堆栈、响应正文、请求对象或 Token。NETWORK_ERROR 不等于已确认 DNS/TLS 故障，超时也不能证明 POST 未被接受；失败仍抛出脱敏异常，使 Worker outcome 保持失败。
+
+仓库配置是安全停用模板，不代表线上实际配置。R3 使用本机 `.git/tibo-r3-wrangler.toml` 保留启用变量、Cron 与执行日志；部署前核对 Cloudflare 当前版本、绑定名称和触发器，避免用模板误停生产。默认正式部署保持 workers_dev=false、preview_urls=false，无公开 HTTP 触发入口。诊断只读预览不包含 Dispatch POST，验证后关闭预览；不要把诊断入口留在正式 Worker 中。
 
 ## 部署前置条件（仅在 Supervisor 授权后执行）
 
