@@ -1,0 +1,11 @@
+name = "tibo-monitor-scheduler"
+main = "worker.mjs"
+compatibility_date = "2026-10-24"
+workers_dev = false
+preview_urls = false
+
+[vars]
+ENABLED = "false"
+
+[triggers]
+crons = []

@@ -33,18 +33,26 @@ concurrency:
 
 jobs:
   monitor:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check out repository
+      - name: Check out current main
         uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
+      - name: Refresh main and snapshot formal state
+        run: python -B persist_state.py prepare
+
       - name: Check for new posts
+        id: monitor
         env:
           X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
@@ -53,46 +61,30 @@ jobs:
           ADDITIONAL_ALERT_EMAIL: ${{ secrets.ADDITIONAL_ALERT_EMAIL }}
           THIRD_ALERT_EMAIL: ${{ secrets.THIRD_ALERT_EMAIL }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          SMTP_HOST: ${{ vars.SMTP_HOST || secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT || secrets.SMTP_PORT || '465' }}
           TARGET_USERNAME: thsottiaux
-        run: |
-          if [ "${{ inputs.mode }}" = "test-email" ]; then
-            python - <<'PY'
-          import os
-          import uuid
-          from monitor import Config, SMTPEmailClient
-
-          config = Config.from_env()
-          recipient = os.environ["THIRD_ALERT_EMAIL"].strip()
-          if not recipient:
-              raise ValueError("THIRD_ALERT_EMAIL is required for the email test.")
-          client = SMTPEmailClient(config.smtp_host, config.smtp_port,
-                                   config.smtp_username, config.smtp_app_password,
-                                   (recipient,))
-          client.send(subject="[Tibo Monitor] Test 邮件",
-                      text="这是一封 Tibo 监控测试邮件。你的邮箱已加入收件人列表，今后有新内容时会收到通知。",
-                      html_body="<p>这是一封 Tibo 监控测试邮件。你的邮箱已加入收件人列表，今后有新内容时会收到通知。</p>",
-                      idempotency_key=f"test-{uuid.uuid4()}")
-          print("Test email accepted by SMTP server.")
-          PY
-          elif [ "${{ inputs.mode }}" = "sample" ]; then
-            python monitor.py --sample
-          elif [ "${{ inputs.mode }}" = "resend" ]; then
-            python monitor.py \
-              --resend-since-id "${{ inputs.resend_since_id }}" \
-              --resend-through-id "${{ inputs.resend_through_id }}"
-          else
-            python monitor.py
-          fi
-
-      - name: Persist monitor state
-        if: always()
+          MODE: ${{ inputs.mode || 'monitor' }}
+          RESEND_SINCE_ID: ${{ inputs.resend_since_id }}
+          RESEND_THROUGH_ID: ${{ inputs.resend_through_id }}
+          MONITOR_REPORT_PATH: ${{ github.workspace }}/.git/tibo-run.json
         shell: bash
         run: |
-          if git diff --quiet -- state.json; then
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state.json
-          git commit -m "Update monitor state"
-          git push
+          case "$MODE" in
+            monitor) python -B monitor.py ;;
+            sample) python -B monitor.py --sample ;;
+            resend) python -B monitor.py --resend-since-id "$RESEND_SINCE_ID" --resend-through-id "$RESEND_THROUGH_ID" ;;
+            test-email) python -B monitor.py --test-email ;;
+            *) echo "Invalid monitor mode"; exit 1 ;;
+          esac
+
+      - name: Persist monitor state
+        if: success()
+        run: python -B persist_state.py persist
+
+      - name: Report unsuccessful run
+        if: failure() || cancelled()
+        shell: bash
+        run: |
+          echo '## Run incomplete' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Check the failed step and monitor counters. State persistence is not confirmed. SMTP acceptance before interruption can cause duplicate email on retry.' >> "$GITHUB_STEP_SUMMARY"
