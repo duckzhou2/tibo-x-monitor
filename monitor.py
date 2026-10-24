@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
-from email.utils import formataddr, parsedate_to_datetime
+from email.utils import formataddr, formatdate, parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -73,13 +73,22 @@ class RunReport:
         print(json.dumps(data, ensure_ascii=False, sort_keys=True))
         report_path = os.environ.get("MONITOR_REPORT_PATH")
         if report_path:
-            Path(report_path).write_text(json.dumps(data) + "\n", encoding="utf-8")
-        summary = os.environ.get("GITHUB_STEP_SUMMARY")
-        if summary:
+            try:
+                Path(report_path).write_text(json.dumps(data) + "\n", encoding="utf-8")
+            except OSError:
+                print("OBSERVABILITY_WRITE_FAILED: report file; business result unchanged.")
+        rows = "".join(f"| {key} | {value} |\n" for key, value in data.items())
+        append_summary("## Tibo monitor\n\n| Metric | Value |\n|---|---|\n" + rows)
+
+
+def append_summary(content: str) -> None:
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        try:
             with open(summary, "a", encoding="utf-8") as stream:
-                stream.write("## Tibo monitor\n\n| Metric | Value |\n|---|---|\n")
-                for key, value in data.items():
-                    stream.write(f"| {key} | {value} |\n")
+                stream.write(content)
+        except OSError:
+            print("OBSERVABILITY_WRITE_FAILED: step summary; business result unchanged.")
 
 
 def validate_post_id(value: Any) -> str:
@@ -421,6 +430,7 @@ class SMTPEmailClient:
         message["From"] = formataddr(("Tibo Monitor", self._username))
         message["To"] = ", ".join(self._to_emails)
         message["Subject"] = subject
+        message["Date"] = formatdate(usegmt=True)
         message["Message-ID"] = f"<{idempotency_key}@tibo-monitor.local>"
         message.set_content(text)
         message.add_alternative(html_body, subtype="html")
@@ -492,7 +502,8 @@ class DeepSeekTranslator:
                         break
                 except MonitorError as exc:
                     if exc.code in {"HTTP_401", "HTTP_403"}:
-                        break
+                        print("Translation authorization failed; remaining sources use explicit fallback.")
+                        return translations
                     retry_delay = getattr(exc, "retry_after", None) or 1
                 except (KeyError, IndexError, TypeError, ValueError, OSError):
                     pass
@@ -558,17 +569,30 @@ class DeepSeekTranslator:
         return found
 
 
+PROTECTED_TEXT = re.compile(r"https?://[^\s<>\"']+|@[A-Za-z0-9_]+|#\w+|`[^`]*`")
+
+
 def needs_translation(content: str) -> bool:
-    prose = re.sub(r"https?://\S+|[@#]\w+|`[^`]*`", "", content)
+    prose = PROTECTED_TEXT.sub("", content)
     return any(char.isascii() and char.isalpha() for char in prose)
 
 
 def valid_translation(source: str, translation: Any) -> bool:
-    if not isinstance(translation, str) or not translation.strip() or translation.strip() == source.strip():
+    if not isinstance(translation, str) or not translation.strip():
         return False
+    # Already-Chinese text may legitimately retain English technical terms.
+    # Unchanged English-only output still fails this Chinese-content check.
     if not re.search(r"[\u3400-\u9fff]", translation):
         return False
-    protected = re.findall(r"https?://[^\s<>]+|[@#]\w+|`[^`]*`", source)
+    protected = []
+    for match in PROTECTED_TEXT.finditer(source):
+        token = match.group()
+        if token.startswith(("http://", "https://")):
+            token = token.rstrip(".,;:!?。，；：！？")
+            for opening, closing in (("(", ")"), ("[", "]"), ("（", "）")):
+                while token.endswith(closing) and token.count(closing) > token.count(opening):
+                    token = token[:-1]
+        protected.append(token)
     return all(token in translation for token in protected)
 
 
@@ -819,18 +843,18 @@ def build_notification(
         f"<p><strong>Tibo @{html.escape(username)}</strong><br>",
         f"时间：{html.escape(created_at)}（北京时间）<br>",
         f"类型：{html.escape(kind)}</p>",
-        f"<blockquote>{html.escape(content).replace(chr(10), '<br>')}</blockquote>",
+        f"<blockquote style=\"white-space:pre-wrap\">{html.escape(content).replace(chr(10), '<br>')}</blockquote>",
     ]
     if translation:
         html_parts.append(
-            "<p><strong>中文翻译：</strong><br>"
+            "<p style=\"white-space:pre-wrap\"><strong>中文翻译：</strong><br>"
             f"{html.escape(translation).replace(chr(10), '<br>')}</p>"
         )
     elif needs_translation(content):
         html_parts.append(f"<p>{html.escape(fallback_notice(translator))}</p>")
     if context:
         html_parts.append(
-            f"<p>{html.escape(context).replace(chr(10), '<br>')}</p>"
+            f"<p style=\"white-space:pre-wrap\">{html.escape(context).replace(chr(10), '<br>')}</p>"
         )
     html_parts.append(
         f'<p><a href="{html.escape(post_url)}">在 X 上打开原帖</a></p>'

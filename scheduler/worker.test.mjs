@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import worker, { dispatch } from "./worker.mjs";
 
@@ -50,4 +50,38 @@ test("network errors are sanitized", async () => {
 
 test("scheduled handler awaits dispatch failure", async () => {
   await assert.rejects(worker.scheduled({}, { ENABLED: "true" }), /TOKEN_MISSING/);
+});
+
+test("disabled scheduled events neither fetch nor read the token", async () => {
+  const network = mock.method(globalThis, "fetch", () => assert.fail("network"));
+  const logs = [];
+  const log = mock.method(console, "log", (value) => logs.push(JSON.parse(value)));
+  try {
+    for (const ENABLED of [undefined, "false", false, "TRUE", "true "]) {
+      await worker.scheduled({ scheduledTime: 1792800000000 }, {
+        ENABLED,
+        get GITHUB_DISPATCH_TOKEN() { assert.fail("disabled event must not read token"); },
+      });
+    }
+    assert.equal(network.mock.callCount(), 0);
+    assert.equal(logs.length, 5);
+    for (const entry of logs) {
+      assert.equal(entry.status, "DISABLED");
+      assert.equal(entry.scheduled_at, new Date(1792800000000).toISOString());
+      assert.ok(Number.isFinite(Date.parse(entry.observed_at)));
+    }
+  } finally { network.mock.restore(); log.mock.restore(); }
+});
+
+test("abort signal timeout is bounded and failure is sanitized", async () => {
+  const timeout = mock.method(AbortSignal, "timeout", (ms) => {
+    assert.equal(ms, 10000);
+    return AbortSignal.abort();
+  });
+  try {
+    await assert.rejects(dispatch(env, async (_url, request) => {
+      assert.equal(request.signal.aborted, true);
+      throw new Error("fixture credential must not be exposed");
+    }), { message: "DISPATCH_NETWORK_OR_TIMEOUT" });
+  } finally { timeout.mock.restore(); }
 });

@@ -15,6 +15,17 @@ wrangler.toml 的 crons=[]、ENABLED=false 是刻意保留的停用配置；R1 �
 
 外部调度只改善事件来源，不消除 GitHub runner 或 SMTP 故障。仍需人工定期核查 Cron 结果、Token 到期和 Actions 历史；本次不搭建独立告警平台。
 
+## 免费方案与真实频率验收
+
+按当前官方 [Limits](https://developers.cloudflare.com/workers/platform/limits/) 和 [Pricing](https://developers.cloudflare.com/workers/platform/pricing/)，Workers Free 支持 Cron，账户最多 5 个触发器，每天 100,000 次请求、每次 10ms CPU。每半小时一次只需要 1 个触发器、每天约 48 次调用，每次 1 个外部子请求；等待网络不计 CPU。这一规模可使用免费方案，但账户其他用量、实际 CPU 与配额必须在授权部署时核实，离线 Node 测试不能证明 Cloudflare CPU 耗时或真实调度可靠性。
+
+启用后至少观察完整 48 小时：
+
+1. Worker 成功日志有 `status`、`scheduled_at`、`observed_at`（UTC ISO 时间），按计划时间每天核对 48 个时槽，统计丢槽、失败及实际相邻间隔的中位数、P95、最大值。超过 60 分钟的空档需解释，不能只看总成功数。
+2. 对照 GitHub 的 `workflow_dispatch` 运行数、created_at、run_started_at、结论和摘要。HTTP 接受、运行创建、实际执行及通知成功是四个不同判据。双调度期间分开统计 schedule 与 workflow_dispatch。
+3. 核对失败、取消、pending 替换和重复邮件；只在没有未解释缺口、SMTP/状态错误时请求 Supervisor 批准移除原生 schedule。之后再次观察 48 小时。移除 schedule 条目不影响保留的 workflow_dispatch；不要点击 Disable workflow。
+4. 发生 Worker 错误、Token 到期、未解释调度缺口或 GitHub runner 故障时，按下面的回退步骤恢复原生触发并保留现场日志；不要回退游标或靠反复手动补发掩盖故障。
+
 ## 回退
 
 先恢复 GitHub 原生 schedule（如已移除），再设置 Worker ENABLED=false 并移除 Cron。确认原生运行恢复后按授权撤销 Token。无需改 state 或业务代码，不要删除正式状态。

@@ -28,6 +28,8 @@
 
 使用文本 SHA-256 来源 ID 和原文回显映射，顺序变化不会错配。拒绝空串、null、非字符串、缺项、重复 ID、未知来源、原文不匹配和明显未译结果，并检查 URL、@mention、标签及行内代码是否保留。结构校验不能证明模型语义翻译准确。
 
+原文回显会增加输出 Token，但保留了独立的来源核对，本项目优先避免错配，不为微小成本删除此检查。URL 句末标点不作为链接身份的一部分，括号属于 URL 时仍保留。已经是中文、夹带 API/GPU 等术语的正文，模型返回不变的中文可以是合法结果，不再仅因与原文相同就误标失败；原样返回纯英文仍被拒绝。认证失败会停止后续翻译批次，剩余内容明确英文回退。
+
 翻译失败**不阻止通知**：成功项保留中文，失败项标注“中文翻译失败，已保留英文原文”；Key 缺失时标注“翻译服务未配置”。日志及 Step Summary 显示待译、成功、失败数量和 DEGRADED / TRANSLATION_FALLBACK；单纯翻译降级不会使 workflow 失败。
 
 monitor、sample、resend 共用此逻辑，不扫描邮件文字判断成功。SMTP 全部接受后，即使英文回退也推进游标，下轮不会专门重发缺译帖子。需要重新翻译时可手动 resend，没有待补译队列。
@@ -44,7 +46,11 @@ monitor、sample、resend 共用此逻辑，不扫描邮件文字判断成功。
 
 业务 step 成功后才运行 persist_state.py。它比较启动快照、候选状态和最新远端状态，在最新远端树上生成只修改 state 的提交，保留其他并发代码修改。普通 push 最多尝试三次，每次重新 fetch 并比较 state；不 force push、不盲目取最大 ID、不 reset 候选状态。远端已保存完全相同状态时明确报告 ALREADY_PERSISTED_IDENTICAL_STATE；其他远端状态变化则失败，等待核对。
 
+上线前确认 Actions 仍可向 main 提交正式 state；如果以后启用强制 PR 或 required checks 的分支保护，应先设计并验证状态提交权限，不能直接套用会阻断机器人 push 的规则。纯 state 提交不运行完整 CI，不能依赖它产生 required check。
+
 **SMTP 接受后、state 成功 push 前仍有重复窗口。**中断、磁盘故障、push 失败或 DATA/QUIT 后断线都可能造成下轮重复。摘要保留批次标识、接受／拒收数量和持久化结果；不能承诺严格恰好一次。失败后先核查这些信息，再决定重试或补发。
+
+摘要或诊断文件不可写时记录 `OBSERVABILITY_WRITE_FAILED`，不改变已完成的业务结果、不阻止 state push；业务失败也不会因此变成成功。邮件保留 Date 和稳定批次 Message-ID，HTML 对正文转义并保留代码缩进。
 
 ## GitHub 配置
 
@@ -92,4 +98,8 @@ Offline tests 在相关 Python、workflow 或 scheduler PR 变更和 main 对应
 
 ## 生产验收
 
-先审查综合 Draft PR 与 CI，确认无生产游标 diff，再授权合并。后续分别验证无新帖、正常中文、英文回退、手动模式、SMTP 全部接受和 state push。真实服务测试、Secret 调整和外部调度切换均需后续授权。旧分支及 Draft PR #1 留到 R2。
+先审查综合 Draft PR 与 CI，确认无生产游标 diff，再授权合并。后续分别验证无新帖、正常中文、英文回退、手动模式、SMTP 全部接受和 state push。真实服务测试、Secret 调整、外部调度切换及旧分支/PR #1 清理均需后续授权。
+
+R2 已准备子进程 CLI 和临时 bare Git 端到端演练；运行 `python -B -m unittest discover -s tests -p test_qualification.py -v` 可单独复核，不需要真实凭据。样本邮件及状态只留在自动清理的临时目录。
+
+合并后原生 cron 仍会自动执行；先记录最新 main/state，核对第一次新代码运行的 since_id、覆盖提示、SMTP 接受和持久化结果。旧两字段 state 会正常迁移，不应重新初始化或直接 resend。生产验证失败时先核实是否已接受邮件，避免盲目重跑。需要代码回退时，从最新 main 建立只回退代码/workflow 的修复 PR，保留最新 state；禁止将 main reset 到旧 SHA 或恢复旧游标。外部调度按 scheduler/README.md 的顺序切换与回退，分支及 PR #1 的清理由 Supervisor 另行授权。

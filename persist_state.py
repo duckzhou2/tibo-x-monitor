@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from monitor import MonitorError, check_state_progress, load_state, validate_state
+from monitor import MonitorError, append_summary, check_state_progress, load_state, validate_state
 
 
 class StateRepository:
@@ -94,12 +94,10 @@ class StateRepository:
 
 def publish(status: str) -> None:
     print(f"STATE_PERSISTENCE: {status}")
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with open(summary, "a", encoding="utf-8") as stream:
-            stream.write(f"\nState persistence: **{status}**\n")
-            if status.startswith("FAILED"):
-                stream.write("SMTP may already have accepted the batch. State is not confirmed; a later attempt can duplicate email. Inspect the monitor batch_id and SMTP counters.\n")
+    content = f"\nState persistence: **{status}**\n"
+    if status.startswith("FAILED"):
+        content += "SMTP may already have accepted the batch. State is not confirmed; a later attempt can duplicate email. Inspect the monitor batch_id and SMTP counters.\n"
+    append_summary(content)
 
 
 def main() -> int:

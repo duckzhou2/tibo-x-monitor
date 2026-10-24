@@ -28,7 +28,12 @@ export async function dispatch(env, fetcher = fetch) {
 }
 
 export default {
-  async scheduled(_controller, env) {
-    console.log(await dispatch(env));
+  async scheduled(controller, env) {
+    const status = await dispatch(env);
+    console.log(JSON.stringify({
+      status,
+      scheduled_at: controller.scheduledTime == null ? null : new Date(controller.scheduledTime).toISOString(),
+      observed_at: new Date().toISOString(),
+    }));
   },
 };

@@ -360,6 +360,33 @@ class TranslationTests(OfflineTests):
         self.assertFalse(m.valid_translation(source, "使用接口"))
         self.assertFalse(m.needs_translation("中文 https://example.com @person"))
 
+    def test_url_sentence_punctuation_and_mentions_are_not_part_of_identity(self):
+        for source, translation in [
+            ("Read https://example.com.", "请看 https://example.com。"),
+            ("Read (https://example.com)", "请看（https://example.com）"),
+            ("Read https://example.com/A_(B)", "请看 https://example.com/A_(B)"),
+            ("Ask @person的话 please", "请询问 @person"),
+        ]:
+            with self.subTest(source=source):
+                self.assertTrue(m.valid_translation(source, translation))
+        self.assertFalse(m.valid_translation("Read https://example.com/A_(B)", "请看 https://example.com/A_"))
+
+    def test_chinese_with_preserved_terms_can_be_valid_unchanged_translation(self):
+        content = "中文支持 API 和 GPU"
+        translator = FakeBatchTranslator({content: content})
+        report = m.RunReport()
+        _, text, _ = m.build_digest([{"id": "101", "text": content}], {}, "thsottiaux", translator, report)
+        self.assertEqual((report.translation_success, report.translation_failed), (1, 0))
+        self.assertNotIn("中文翻译失败", text)
+        self.assertFalse(m.valid_translation("English only", "English only"))
+        self.assertTrue(m.needs_translation("中文 and an English sentence"))
+
+    def test_permanent_auth_failure_stops_later_batches(self):
+        with patch("monitor.request_json", side_effect=m.MonitorError("HTTP_401")) as request:
+            result = m.DeepSeekTranslator("fixture").translate_many(["a" * 4000, "b" * 4000])
+        self.assertEqual(result, {})
+        self.assertEqual(request.call_count, 1)
+
     def test_deepseek_retry_after_is_honored(self):
         error = m.MonitorError("HTTP_429"); error.retry_after = 5
         with patch("monitor.request_json", side_effect=[error, completion([translated("English")])]), patch("monitor.time.sleep") as sleep:
@@ -529,6 +556,14 @@ class SMTPTests(OfflineTests):
 
 
 class CLITests(OfflineTests):
+    def test_report_file_failure_does_not_change_successful_business_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"MONITOR_REPORT_PATH": directory}, clear=True), contextlib.redirect_stdout(io.StringIO()) as output:
+                report = m.RunReport(status="SENT", smtp="ALL_ACCEPTED", state_written=True)
+                report.publish()
+            self.assertEqual(report.status, "SENT")
+            self.assertIn("OBSERVABILITY_WRITE_FAILED", output.getvalue())
+
     def test_real_control_flow_partial_translation_smtp_and_state(self):
         response = page([101])
         response["data"][0]["referenced_tweets"] = [{"type": "quoted", "id": "9"}]
@@ -538,7 +573,11 @@ class CLITests(OfflineTests):
             path = Path(directory) / "state.json"
             path.write_text('{"initialized":true,"last_seen_id":"100"}', encoding="utf-8")
             report = Path(directory) / "report.json"
-            with patch("sys.argv", ["monitor.py", "--state", str(path)]), patch("monitor.Config.from_env", return_value=replace(config(), deepseek_api_key="fixture")), patch("monitor.request_json", side_effect=[response, partial, TimeoutError()]) as request, patch("monitor.smtplib.SMTP_SSL") as factory, patch("monitor.time.sleep"), patch.dict(os.environ, {"MONITOR_REPORT_PATH": str(report)}, clear=True), contextlib.redirect_stdout(io.StringIO()) as output:
+            environment = {"MONITOR_REPORT_PATH": str(report)}
+            # Windows' certificate loader needs SystemRoot even with all service secrets cleared.
+            if os.name == "nt":
+                environment["SystemRoot"] = os.environ["SystemRoot"]
+            with patch("sys.argv", ["monitor.py", "--state", str(path)]), patch("monitor.Config.from_env", return_value=replace(config(), deepseek_api_key="fixture")), patch("monitor.request_json", side_effect=[response, partial, TimeoutError()]) as request, patch("monitor.smtplib.SMTP_SSL") as factory, patch("monitor.time.sleep"), patch.dict(os.environ, environment, clear=True), contextlib.redirect_stdout(io.StringIO()) as output:
                 smtp = factory.return_value.__enter__.return_value
                 smtp.send_message.return_value = {}
                 self.assertEqual(m.main(), 0)

@@ -134,6 +134,25 @@ class PersistenceTests(unittest.TestCase):
             self.repository.prepare()
         self.assertEqual(load_state(self.work / "state.json"), expected)
 
+    def test_push_accepted_but_ack_lost_is_explicitly_reconciled(self):
+        self.repository.prepare()
+        expected = self.candidate()
+        original = self.repository.git
+        before = self.git(self.remote, "rev-parse", "main")
+        calls = 0
+        def lose_ack(*args, **kwargs):
+            nonlocal calls
+            result = original(*args, **kwargs)
+            if args[0] == "push":
+                calls += 1
+                raise MonitorError("GIT_UNAVAILABLE_OR_TIMEOUT")
+            return result
+        with patch.object(self.repository, "git", side_effect=lose_ack), patch("persist_state.time.sleep"):
+            self.assertEqual(self.repository.persist(), "ALREADY_PERSISTED_IDENTICAL_STATE")
+        self.assertEqual(calls, 1)
+        self.assertEqual(self.remote_state(), expected)
+        self.assertEqual(self.git(self.remote, "rev-list", "--count", before + "..main"), "1")
+
 
 if __name__ == "__main__":
     unittest.main()
