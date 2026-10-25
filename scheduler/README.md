@@ -1,8 +1,10 @@
-# 可选外部调度
+# Cloudflare 定时调度（已上线）
 
 唯一用途：Cloudflare Workers Cron Trigger → GitHub Workflow Dispatch → main 的既有 monitor 模式。Worker 不读取 X/DeepSeek/SMTP 凭据，不执行监控或保存游标，也没有公开 HTTP 触发入口。
 
-wrangler.toml 的 crons=[]、ENABLED=false 是刻意保留的停用配置；R1 不改变 GitHub 原生 cron。请求超时 10 秒，接受当前 API 的 HTTP 200 及旧版 204，其他状态及网络异常明确失败，不输出响应正文。POST 不自动重试，避免接受后丢失响应引起即时重复；下个 Cron 再尝试。HTTP 接受不证明监控 job 成功或邮件送达。
+**当前正式配置**（2026-10-25）：Cloudflare Worker 已启用，Cron 为 `7,37 * * * *`（UTC）；GitHub 原生 schedule 同样保留，这是经用户接受的双调度长期运行方式。仓库 `wrangler.toml` 的 `crons=[]`、`ENABLED=false` 刻意保留为**停用安全模板**，不代表线上配置，不能直接用它覆盖生产部署。
+
+Worker 请求上限 10 秒，接受 GitHub 200/204，其他状态或网络异常明确失败；POST 不自动重试，避免接受后丢失响应引起即时重复。HTTP 接受不证明 GitHub Job 成功或邮件送达。
 
 ## 请求兼容性与故障诊断
 
@@ -12,31 +14,27 @@ Cloudflare Workers 不支持 `redirect: "error"`，会在发出 HTTP 请求前�
 
 仓库配置是安全停用模板，不代表线上实际配置。R3 使用本机 `.git/tibo-r3-wrangler.toml` 保留启用变量、Cron 与执行日志；部署前核对 Cloudflare 当前版本、绑定名称和触发器，避免用模板误停生产。默认正式部署保持 workers_dev=false、preview_urls=false，无公开 HTTP 触发入口。诊断只读预览不包含 Dispatch POST，验证后关闭预览；不要把诊断入口留在正式 Worker 中。
 
-## 部署前置条件（仅在 Supervisor 授权后执行）
+## 正式部署与凭据维护
 
-1. R1 已审查合入 main、离线测试通过；确认 Cloudflare 账户及计划限制。
-2. 人工创建有到期日的 GitHub fine-grained PAT：资源所有者选仓库所有者，Repository access **仅选 duckzhou2/tibo-x-monitor**；仅授予 **Actions: write** 和 GitHub 自动要求的 Metadata: read，不授予 Contents write。GitHub 不能进一步把此权限限定为单一 workflow，需要认可其仓库内 Actions 权限范围并定期轮换。
-3. 仅在 Cloudflare 部署环境创建 Secret binding `GITHUB_DISPATCH_TOKEN`，通过安全输入注入，不写入 TOML、仓库、聊天或命令行参数。不配置任何 X/DeepSeek/SMTP Secret。
-4. 用 Cloudflare 控制台或已批准的 Wrangler 安装部署本目录模块，先保持 Cron 为空、ENABLED=false；R1 不安装部署依赖。
-5. 授权真实验收后设置 ENABLED=true，把 Cron 配成 `7,37 * * * *`（UTC），观察实际 dispatch、Actions、邮件和 state。配置传播可能延迟，不承诺严格半小时 SLA。
-6. 外部触发验收稳定后，再单独授权移除 GitHub 原生 schedule 条目。不要禁用整个 workflow，否则 dispatch 也会失效。短期双调度会多做空轮询；全局 concurrency 和 job 开始时读取最新 main 防止同时用旧状态发送。GitHub 可能替换尚未执行的 pending job，concurrency 不是持久化事件队列。
+1. **优先保持现有 Worker 运行，不需重新部署。**若必须维护，先检查 Cloudflare 中实际 Worker 版本、`ENABLED`、Cron、Secret 绑定，再对照本机 `.git/` 下保留的 R3 部署配置。仓库中的停用模板不能直接作为生产配置上传。
+2. GitHub Fine-grained PAT 仅授权 `duckzhou2/tibo-x-monitor` 仓库的 **Actions: write**（及 GitHub 要求的 Metadata: read），设置到期日并按需轮换。GitHub 不能把这项权限进一步限定到单个 Workflow。
+3. 仅通过 Cloudflare 安全 Secret 绑定 `GITHUB_DISPATCH_TOKEN`；不得写入仓库、日志、聊天或配置文件，不需要把 X/DeepSeek/SMTP Secret 交给 Worker。
+4. 当前 Worker 保持 `workers_dev=false`、`preview_urls=false`，无公开 HTTP 触发入口。更改配置后同时验证 Cloudflare Cron → GitHub `workflow_dispatch` → monitor → state 链路；不要仅以 HTTP 200 判断全链路成功。
+5. 当前 **不计划移除 GitHub 原生 Cron**。若以后主动决定切换单一调度，先评估取消／并发风险并完成受控验证；不得 Disable 整个 GitHub Workflow（否则 Dispatch 也不可用）。
 
-外部调度只改善事件来源，不消除 GitHub runner 或 SMTP 故障。仍需人工定期核查 Cron 结果、Token 到期和 Actions 历史；本次不搭建独立告警平台。
+外部调度只改善触发时间来源，并不能消除 GitHub Runner、X、SMTP 或凭据故障。额外健康巡检已停止；在缺乏邮件或运行记录时，应人工查阅 GitHub Actions 与 Cloudflare 日志。
 
-## 免费方案与真实频率验收
+## 运行观察与已知限制
 
-按当前官方 [Limits](https://developers.cloudflare.com/workers/platform/limits/) 和 [Pricing](https://developers.cloudflare.com/workers/platform/pricing/)，Workers Free 支持 Cron，账户最多 5 个触发器，每天 100,000 次请求、每次 10ms CPU。每半小时一次只需要 1 个触发器、每天约 48 次调用，每次 1 个外部子请求；等待网络不计 CPU。这一规模可使用免费方案，但账户其他用量、实际 CPU 与配额必须在授权部署时核实，离线 Node 测试不能证明 Cloudflare CPU 耗时或真实调度可靠性。
+按 Cloudflare 官方 [Limits](https://developers.cloudflare.com/workers/platform/limits/) 和 [Pricing](https://developers.cloudflare.com/workers/platform/pricing/)，每半小时约 48 次调用属于较小规模，仍应在实际账户核实 CPU 与免费配额。
 
-启用后至少观察完整 48 小时：
+R3 修复后在 **2026-10-25** 累计约 19 小时的试运行中，报告了 39 次外部 Dispatch：**38 次成功、1 次取消**，相邻创建间隔中位数约 30 分钟，最大约 30 分 01 秒。真实生产已验证新帖翻译、SMTP 接受及 state 持久化；另有一次部分翻译失败（4 项中 2 项回退英文）和一次原因未完全明确的取消。少量 Cloudflare 日志采集缺口不能直接视作业务故障。
 
-1. Worker 成功日志有 `status`、`scheduled_at`、`observed_at`（UTC ISO 时间），按计划时间每天核对 48 个时槽，统计丢槽、失败及实际相邻间隔的中位数、P95、最大值。超过 60 分钟的空档需解释，不能只看总成功数。
-2. 对照 GitHub 的 `workflow_dispatch` 运行数、created_at、run_started_at、结论和摘要。HTTP 接受、运行创建、实际执行及通知成功是四个不同判据。双调度期间分开统计 schedule 与 workflow_dispatch。
-3. 核对失败、取消、pending 替换和重复邮件；只在没有未解释缺口、SMTP/状态错误时请求 Supervisor 批准移除原生 schedule。之后再次观察 48 小时。移除 schedule 条目不影响保留的 workflow_dispatch；不要点击 Disable workflow。
-4. 发生 Worker 错误、Token 到期、未解释调度缺口或 GitHub runner 故障时，按下面的回退步骤恢复原生触发并保留现场日志；不要回退游标或靠反复手动补发掩盖故障。
+该观察窗口是**经用户要求提前结束**，不是原定 48 小时资格化，不能据此保证长期无故障。双 Cron 已确认保留；现阶段没有进一步切换任务。若后续需要查因，分别核对 Cloudflare `scheduled_at`／`observed_at`、GitHub `workflow_dispatch` 的创建和完成时间、SMTP 结果以及 `state.json` 变化。发生网络故障、Token 到期、持续缺槽或多次取消时，再实施针对性维护。
 
 ## 回退
 
-先恢复 GitHub 原生 schedule（如已移除），再设置 Worker ENABLED=false 并移除 Cron。确认原生运行恢复后按授权撤销 Token。无需改 state 或业务代码，不要删除正式状态。
+当前 GitHub 原生 schedule 仍处于启用状态。如果仅需停用外部 Worker，先核查原生 Cron 正常，再将线上 Worker 设置 `ENABLED=false` 并移除 Cloudflare Cron；不要修改正式 `state.json`。如果将来原生 Cron 已被移除，则须先恢复原生 schedule，再停用外部调度。回退完成后根据实际情况撤销或轮换 Token，不得恢复旧游标。
 
 ## 离线验证
 

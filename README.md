@@ -4,9 +4,11 @@
 
 ## 调度与当前边界
 
-现有 GitHub cron 保留为 `7,37 * * * *`（UTC），计划每半小时检查。**这不是实际半小时保证。**R0 的 2026-10-10—10-24 统计窗口中，理论 672 次、实际 75 次，中位间隔约 4 小时 33 分钟。
+**当前生产为双调度**：Cloudflare Workers Cron 每半小时触发 GitHub `workflow_dispatch`（`monitor` 模式）；GitHub 原生 `schedule` 同时保留作为冗余。两边均配置 `7,37 * * * *`（UTC）。X 查询、翻译、邮件和游标更新仍只在 GitHub Actions 中执行。
 
-`scheduler/` 提供尚未启用的 Cloudflare Cron → GitHub workflow_dispatch 组件，只调用现有 monitor 模式。当前没有 Cron 且 ENABLED=false。本次不部署、不创建 Token、不关闭原生 cron，见 [调度说明](scheduler/README.md)。
+R0 的 2026-10-10—24 统计窗口里，GitHub 原生 Cron 理论 672 次、实际 75 次，中位间隔约 4 小时 33 分钟，因此引入 Cloudflare。2026-10-25 的 R3 并行试运行约 19 小时，外部 Dispatch 记录 38 次成功、1 次取消，间隔中位数 30 分钟，最大约 30 分 01 秒。用户已批准按实际观察提前收口，**不宣称完成原计划的 48 小时验证**。一次取消的具体原因未确认，但未发现由此造成的游标回退或通知中断。当前双 Cron 是刻意保留的正式运行配置。
+
+**注意：**仓库中的 `scheduler/wrangler.toml` 是安全停用模板（`ENABLED=false`、`crons=[]`），**不代表 Cloudflare 已部署的线上设置**；重新部署时必须先核对实际配置，避免误停现有调度。详情见 [调度维护说明](scheduler/README.md)。
 
 全局 concurrency 覆盖 schedule 和手动模式。Job 获得执行机会后重新 fetch 最新 main，读取最新正式状态，避免使用事件创建时的旧游标。正式 job 仅允许 main 执行。
 
@@ -81,7 +83,7 @@ Gmail/Googlemail、QQ 自动选择 SSL SMTP 主机，默认端口 465。其他�
 | resend | resend_since_id 为不含下界，resend_through_id 为包含上界；仅最近 7 天可检索内容 | 否 |
 | test-email | 仅向第三收件人发测试，不调用 X/DeepSeek | 否 |
 
-这些模式会真实调用相应服务。R1 离线测试不会触发它们。非法输入在调用服务前拒绝。
+这些模式会真实调用相应服务；离线测试不会触发生产服务。非法输入在调用服务前拒绝。
 
 ## 离线测试和 CI
 
@@ -94,12 +96,16 @@ node --test scheduler/worker.test.mjs
 
 服务全部使用 Mock；Git 冲突测试使用临时本地 bare 仓库，状态测试使用临时 fixture。禁止拿正式 state 做实验。
 
-Offline tests 在相关 Python、workflow 或 scheduler PR 变更和 main 对应 push 时运行；仅更新 state 不触发测试。CI 不执行生产监控、不传生产 Secrets。分支保护与外部调度启用留待 Supervisor 验收。
+Offline tests 在相关 Python、workflow 或 scheduler 代码变更和 main 对应 push 时运行；仅更新 state 不触发测试。CI 不执行生产监控、不传生产 Secrets。若将来启用 main 分支保护，须先验证不会阻断 Actions 持久化 state。
 
-## 生产验收
+## 生产验收与长期维护
 
-先审查综合 Draft PR 与 CI，确认无生产游标 diff，再授权合并。后续分别验证无新帖、正常中文、英文回退、手动模式、SMTP 全部接受和 state push。真实服务测试、Secret 调整、外部调度切换及旧分支/PR #1 清理均需后续授权。
+**状态：FINAL ACCEPTED / CLOSED / LONG-TERM MAINTENANCE（2026-10-25）**。可靠性升级 [PR #8](https://github.com/duckzhou2/tibo-x-monitor/pull/8) 与 Cloudflare 兼容性修复 [PR #9](https://github.com/duckzhou2/tibo-x-monitor/pull/9) 已普通合并；历史 PR #1、旧分支和临时开发工作树已收尾，远端仅保留 main。Python 115 项、Worker 18 项离线测试已通过。
 
-R2 已准备子进程 CLI 和临时 bare Git 端到端演练；运行 `python -B -m unittest discover -s tests -p test_qualification.py -v` 可单独复核，不需要真实凭据。样本邮件及状态只留在自动清理的临时目录。
+真实运行已验证：无新帖正常退出；原创和回复／引用上下文抓取；DeepSeek 成功翻译及部分失败的英文回退；SMTP 全部收件人接受；`state.json` 正常推进及持久化；Cloudflare 自然 Cron 成功创建并执行 GitHub Workflow。**SMTP 接受不是收件箱送达的绝对保证；异常退出仍可能造成少量重复邮件。**
 
-合并后原生 cron 仍会自动执行；先记录最新 main/state，核对第一次新代码运行的 since_id、覆盖提示、SMTP 接受和持久化结果。旧两字段 state 会正常迁移，不应重新初始化或直接 resend。生产验证失败时先核实是否已接受邮件，避免盲目重跑。需要代码回退时，从最新 main 建立只回退代码/workflow 的修复 PR，保留最新 state；禁止将 main reset 到旧 SHA 或恢复旧游标。外部调度按 scheduler/README.md 的顺序切换与回退，分支及 PR #1 的清理由 Supervisor 另行授权。
+2026-10-25 的约 19 小时并行观察经用户同意提前收口，保留 Cloudflare + GitHub 原生双 Cron；不安排额外 48 小时验收，也不删除其中一个触发器。独立自动巡检任务已按用户要求停止，**监控本身仍正常运行**。
+
+长期维护仅需在实际异常时核查 [GitHub Actions](https://github.com/duckzhou2/tibo-x-monitor/actions)、Cloudflare 定时任务和正式游标。GitHub Fine-grained PAT 到期前需要续期；由于额外健康巡检已停用，若两套调度同时失效，可能不会另有自动告警。任何更新均以最新 `origin/main` 和最新 `state.json` 为准：不能重新初始化、覆盖旧游标或靠盲目 resend 修复故障。部署与回退见 [scheduler/README.md](scheduler/README.md)。
+
+端到端离线演练可单独复核：`python -B -m unittest discover -s tests -p test_qualification.py -v`；无需真实凭据或生产调用。
