@@ -1064,7 +1064,7 @@ def run_monitor(
         )
         if coverage:
             report.coverage_warning = True
-            print(f"COVERAGE_WARNING: @{username} prior successful check unknown or at least 7 days old; Recent Search only covers 7 days.")
+            print(f"COVERAGE_WARNING: @{username} prior successful check unknown or at least 7 days old; Recent Search cannot prove complete historical coverage.")
         options = {"baseline": previous is None}
         if budget is not None:
             options["budget"] = budget
