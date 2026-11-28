@@ -1,4 +1,4 @@
-name: Monitor Tibo on X
+name: AI X Monitor
 
 on:
   schedule:
@@ -15,6 +15,10 @@ on:
           - sample
           - resend
           - test-email
+      account:
+        description: "Configured username for sample/resend (default: thsottiaux)"
+        required: false
+        type: string
       resend_since_id:
         description: "Exclusive lower post ID for a resend"
         required: false
@@ -28,7 +32,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: tibo-x-monitor
+  group: ai-x-monitor
   cancel-in-progress: false
 
 jobs:
@@ -63,27 +67,42 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           SMTP_HOST: ${{ vars.SMTP_HOST || secrets.SMTP_HOST }}
           SMTP_PORT: ${{ vars.SMTP_PORT || secrets.SMTP_PORT || '465' }}
-          TARGET_USERNAME: thsottiaux
           MODE: ${{ inputs.mode || 'monitor' }}
+          ACCOUNT: ${{ inputs.account || 'thsottiaux' }}
           RESEND_SINCE_ID: ${{ inputs.resend_since_id }}
           RESEND_THROUGH_ID: ${{ inputs.resend_through_id }}
-          MONITOR_REPORT_PATH: ${{ github.workspace }}/.git/tibo-run.json
+          MONITOR_REPORT_PATH: ${{ github.workspace }}/.git/ai-x-run.json
         shell: bash
         run: |
           case "$MODE" in
-            monitor) python -B monitor.py ;;
-            sample) python -B monitor.py --sample ;;
-            resend) python -B monitor.py --resend-since-id "$RESEND_SINCE_ID" --resend-through-id "$RESEND_THROUGH_ID" ;;
+            monitor)
+              code=0
+              python -B monitor.py || code=$?
+              if [[ "$code" == 2 ]]; then
+                echo "partial_failure=true" >> "$GITHUB_OUTPUT"
+              else
+                exit "$code"
+              fi
+              ;;
+            sample) python -B monitor.py --sample --account "$ACCOUNT" ;;
+            resend) python -B monitor.py --resend-since-id "$RESEND_SINCE_ID" --resend-through-id "$RESEND_THROUGH_ID" --account "$ACCOUNT" ;;
             test-email) python -B monitor.py --test-email ;;
             *) echo "Invalid monitor mode"; exit 1 ;;
           esac
 
       - name: Persist monitor state
+        id: persist
         if: success()
         run: python -B persist_state.py persist
 
+      - name: Report partial account failure
+        if: steps.monitor.outputs.partial_failure == 'true'
+        run: |
+          echo 'At least one account failed. Healthy account state was processed by the persistence step.' >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
       - name: Report unsuccessful run
-        if: failure() || cancelled()
+        if: cancelled() || (failure() && steps.persist.outcome != 'success')
         shell: bash
         run: |
           echo '## Run incomplete' >> "$GITHUB_STEP_SUMMARY"

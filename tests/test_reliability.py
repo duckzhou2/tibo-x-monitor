@@ -436,7 +436,7 @@ class StateAndDeliveryTests(OfflineTests):
         with patch("monitor.os.replace", side_effect=OSError("fixture")):
             with self.assertRaises(OSError): m.save_state(self.path, dict(self.initial, last_seen_id="101"))
         self.assertEqual(m.load_state(self.path), self.initial)
-        self.assertEqual(list(self.path.parent.glob(".tibo-state-*.tmp")), [])
+        self.assertEqual(list(self.path.parent.glob(".ai-x-state-*.tmp")), [])
 
     def test_atomic_fsync_failure_preserves_original(self):
         with patch("monitor.os.fsync", side_effect=OSError("fixture")):

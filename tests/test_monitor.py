@@ -159,7 +159,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(x_client.calls, [("thsottiaux", "100")])
         self.assertEqual(sent, 2)
         self.assertEqual(len(email.messages), 1)
-        self.assertEqual(email.messages[0]["subject"], "[Tibo 更新] 2 条新内容")
+        self.assertEqual(email.messages[0]["subject"], "[AI X Monitor] 2 条新内容")
         text = email.messages[0]["text"]
         self.assertLess(text.find("original text"), text.find("reply text"))
         self.assertIn("回复对象：@someone", text)
@@ -176,7 +176,7 @@ class MonitorTests(unittest.TestCase):
             "thsottiaux",
         )
 
-        self.assertEqual(subject, "[Tibo 更新] 2 条新内容")
+        self.assertEqual(subject, "[AI X Monitor] 2 条新内容")
         self.assertIn("--- 第 1 条 ---", text)
         self.assertIn("--- 第 2 条 ---", text)
         self.assertIn("first", text)
@@ -320,7 +320,7 @@ class MonitorTests(unittest.TestCase):
         )
 
         self.assertEqual(len(email.messages), 1)
-        self.assertEqual(email.messages[0]["subject"], "[重新翻译] [Tibo 更新] 2 条新内容")
+        self.assertEqual(email.messages[0]["subject"], "[重新翻译] [AI X Monitor] 2 条新内容")
         self.assertIn("first", email.messages[0]["text"])
         self.assertIn("second", email.messages[0]["text"])
         self.assertNotIn("third", email.messages[0]["text"])
@@ -370,7 +370,7 @@ class MonitorTests(unittest.TestCase):
         smtp.login.assert_called_once_with("sender@gmail.com", "app-password")
         message = smtp.send_message.call_args.args[0]
         self.assertEqual(message["To"], "recipient@example.com, second@example.com")
-        self.assertEqual(message["Message-ID"], "<post-123@tibo-monitor.local>")
+        self.assertEqual(message["Message-ID"], "<post-123@ai-x-monitor.local>")
 
 
 if __name__ == "__main__":

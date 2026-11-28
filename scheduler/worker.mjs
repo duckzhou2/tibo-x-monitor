@@ -1,4 +1,5 @@
 // Dispatch only. All X, translation, email and state work stays in Actions.
+// Use the repository ID so dispatch survives a repository rename without redirects.
 function failure(status, diagnostic) {
   return Object.assign(new Error(status), { diagnostic: { ...diagnostic, status } });
 }
@@ -13,14 +14,14 @@ export async function dispatch(env, fetcher = fetch) {
   try {
     signal = AbortSignal.timeout(10000);
     response = await fetcher(
-      "https://api.github.com/repos/duckzhou2/tibo-x-monitor/actions/workflows/monitor.yml/dispatches",
+      "https://api.github.com/repositories/1310209577/actions/workflows/monitor.yml/dispatches",
       {
         method: "POST",
         headers: {
           Authorization: `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
           Accept: "application/vnd.github+json",
           "Content-Type": "application/json",
-          "User-Agent": "tibo-monitor-scheduler",
+          "User-Agent": "ai-x-monitor-scheduler",
           "X-GitHub-Api-Version": "2026-03-10",
         },
         body: JSON.stringify({ ref: "main", inputs: { mode: "monitor" } }),

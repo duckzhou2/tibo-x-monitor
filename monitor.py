@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, parsedate_to_datetime
@@ -28,6 +28,9 @@ from zoneinfo import ZoneInfo
 X_API_BASE = "https://api.x.com/2"
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEFAULT_STATE_PATH = Path(__file__).with_name("state.json")
+ACCOUNTS_PATH = Path(__file__).with_name("accounts.json")
+BRAND = "AI X Monitor"
+USERNAME_PATTERN = r"[a-z0-9_]{1,15}"
 
 
 class MonitorError(RuntimeError):
@@ -67,6 +70,7 @@ class RunReport:
     context_missing: int = 0
     batch_id: str = ""
     failure_type: str = ""
+    accounts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def publish(self) -> None:
         data = vars(self)
@@ -77,8 +81,10 @@ class RunReport:
                 Path(report_path).write_text(json.dumps(data) + "\n", encoding="utf-8")
             except OSError:
                 print("OBSERVABILITY_WRITE_FAILED: report file; business result unchanged.")
-        rows = "".join(f"| {key} | {value} |\n" for key, value in data.items())
-        append_summary("## Tibo monitor\n\n| Metric | Value |\n|---|---|\n" + rows)
+        rows = "".join(f"| {key} | {value} |\n" for key, value in data.items() if key != "accounts")
+        account_rows = "".join(f"| @{username} | {entry} |\n" for username, entry in self.accounts.items())
+        append_summary(f"## {BRAND}\n\n| Metric | Value |\n|---|---|\n" + rows +
+                       ("\n| Account | Result |\n|---|---|\n" + account_rows if account_rows else ""))
 
 
 def append_summary(content: str) -> None:
@@ -98,6 +104,38 @@ def validate_post_id(value: Any) -> str:
 
 
 @dataclass(frozen=True)
+class Account:
+    username: str
+    name: str
+    platform: str
+
+
+LEGACY_ACCOUNT = Account("thsottiaux", "Tibo Sottiaux", "OpenAI")
+
+
+def load_accounts(path: Path) -> tuple[Account, ...]:
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise MonitorError("ACCOUNTS_CONFIG_UNREADABLE") from None
+    if not isinstance(rows, list) or not rows:
+        raise MonitorError("ACCOUNTS_CONFIG_INVALID")
+    accounts = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"username", "name", "platform"} or any(
+            not isinstance(value, str) or not value.strip() for value in row.values()
+        ):
+            raise MonitorError("ACCOUNTS_CONFIG_INVALID")
+        account = Account(**row)
+        if not re.fullmatch(USERNAME_PATTERN, account.username) or account.username in accounts:
+            raise MonitorError("ACCOUNTS_CONFIG_INVALID")
+        accounts[account.username] = account
+    if LEGACY_ACCOUNT.username not in accounts:
+        raise MonitorError("LEGACY_ACCOUNT_REQUIRED")
+    return tuple(accounts.values())
+
+
+@dataclass(frozen=True)
 class Config:
     x_bearer_token: str
     smtp_username: str
@@ -106,7 +144,7 @@ class Config:
     smtp_host: str
     deepseek_api_key: str = ""
     smtp_port: int = 465
-    target_username: str = "thsottiaux"
+    accounts: tuple[Account, ...] = (LEGACY_ACCOUNT,)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -138,7 +176,7 @@ class Config:
             ),
             deepseek_api_key=os.environ.get("DEEPSEEK_API_KEY", "").strip(),
             smtp_port=int(os.environ.get("SMTP_PORT", "465")),
-            target_username=os.environ.get("TARGET_USERNAME", "thsottiaux").strip().lstrip("@"),
+            accounts=load_accounts(ACCOUNTS_PATH),
         )
 
 
@@ -234,8 +272,12 @@ class XClient:
         self._report = report
 
     def fetch_posts(
-        self, username: str, since_id: str | None, *, baseline: bool = False
+        self, username: str, since_id: str | None, *, baseline: bool = False,
+        start_time: str | None = None, budget: float | None = None, cursor_only: bool = False,
     ) -> dict[str, Any]:
+        deadline = self._deadline
+        if budget is not None:
+            deadline = Deadline(min(budget, deadline.remaining()))
         all_posts: list[dict[str, Any]] = []
         all_users: dict[str, dict[str, Any]] = {}
         all_included_posts: dict[str, dict[str, Any]] = {}
@@ -246,6 +288,13 @@ class XClient:
         previous_oldest: int | None = None
         if since_id is not None:
             validate_post_id(since_id)
+        if start_time:
+            cutoff = datetime.fromisoformat(start_time)
+            start_time = (
+                cutoff.isoformat(timespec="seconds").replace("+00:00", "Z")
+                if cutoff > datetime.now(timezone.utc) - timedelta(days=7) + timedelta(seconds=5)
+                else None
+            )
 
         while True:
             params = {
@@ -264,14 +313,19 @@ class XClient:
             }
             if since_id:
                 params["since_id"] = since_id
+            if start_time:
+                params["start_time"] = start_time
             if next_token:
                 params["next_token"] = next_token
+            if cursor_only:
+                for field_name in ("tweet.fields", "expansions", "user.fields"):
+                    del params[field_name]
 
             url = (
                 f"{X_API_BASE}/tweets/search/recent?"
                 f"{urllib.parse.urlencode(params)}"
             )
-            page = request_json(url, headers=self._headers, deadline=self._deadline)
+            page = request_json(url, headers=self._headers, deadline=deadline)
             pages += 1
             if self._report is not None:
                 self._report.pages = pages
@@ -431,7 +485,7 @@ class SMTPEmailClient:
         message["To"] = ", ".join(self._to_emails)
         message["Subject"] = subject
         message["Date"] = formatdate(usegmt=True)
-        message["Message-ID"] = f"<{idempotency_key}@tibo-monitor.local>"
+        message["Message-ID"] = f"<{idempotency_key}@ai-x-monitor.local>"
         message.set_content(text)
         message.add_alternative(html_body, subtype="html")
 
@@ -605,8 +659,11 @@ class CachedTranslator:
         return self._translations.get(content, "")
 
 
-def validate_state(state: Any) -> dict[str, Any]:
-    if not isinstance(state, dict) or set(state) - {"initialized", "last_seen_id", "last_checked_at"}:
+def validate_account_state(state: Any, *, additional: bool = False) -> dict[str, Any]:
+    fields = {"initialized", "last_seen_id", "last_checked_at"}
+    if additional:
+        fields.add("baseline_at")
+    if not isinstance(state, dict) or set(state) - fields:
         raise MonitorError("STATE_INVALID_STRUCTURE")
     if type(state.get("initialized")) is not bool or "last_seen_id" not in state:
         raise MonitorError("STATE_INVALID_TYPES")
@@ -615,14 +672,38 @@ def validate_state(state: Any) -> dict[str, Any]:
         validate_post_id(cursor)
     if not state["initialized"] and cursor is not None:
         raise MonitorError("STATE_INCONSISTENT")
-    if "last_checked_at" in state:
-        try:
-            checked = datetime.fromisoformat(state["last_checked_at"].replace("Z", "+00:00"))
-            if checked.utcoffset() is None or checked > datetime.now(timezone.utc) + timedelta(minutes=5):
-                raise ValueError("Invalid check time")
-        except (AttributeError, TypeError, ValueError):
-            raise MonitorError("STATE_INVALID_CHECK_TIME") from None
+    for name in ("last_checked_at", "baseline_at"):
+        if name in state:
+            try:
+                checked = datetime.fromisoformat(state[name])
+                if checked.utcoffset() is None or checked > datetime.now(timezone.utc) + timedelta(minutes=5):
+                    raise ValueError("Invalid check time")
+            except (TypeError, ValueError):
+                raise MonitorError("STATE_INVALID_CHECK_TIME") from None
+    if additional and (
+        not state["initialized"] or "last_checked_at" not in state
+        or (cursor is None and "baseline_at" not in state)
+        or ("baseline_at" in state and datetime.fromisoformat(state["baseline_at"]) > datetime.fromisoformat(state["last_checked_at"]))
+    ):
+        raise MonitorError("STATE_INCONSISTENT")
     return dict(state)
+
+
+def validate_state(state: Any) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        raise MonitorError("STATE_INVALID_STRUCTURE")
+    validated = validate_account_state({key: value for key, value in state.items() if key != "accounts"})
+    if "accounts" in state:
+        accounts = state["accounts"]
+        if not isinstance(accounts, dict) or any(
+            not isinstance(name, str) or not re.fullmatch(USERNAME_PATTERN, name) or name == LEGACY_ACCOUNT.username
+            for name in accounts
+        ):
+            raise MonitorError("STATE_INVALID_STRUCTURE")
+        validated["accounts"] = {
+            name: validate_account_state(entry, additional=True) for name, entry in accounts.items()
+        }
+    return validated
 
 
 def load_state(path: Path, *, allow_missing: bool = False) -> dict[str, Any]:
@@ -636,9 +717,7 @@ def load_state(path: Path, *, allow_missing: bool = False) -> dict[str, Any]:
         raise MonitorError("STATE_INVALID_JSON") from None
 
 
-def check_state_progress(old: dict[str, Any], new: dict[str, Any]) -> None:
-    validate_state(old)
-    validate_state(new)
+def check_account_progress(old: dict[str, Any], new: dict[str, Any]) -> None:
     if old["initialized"] and not new["initialized"]:
         raise MonitorError("STATE_INITIALIZATION_REGRESSION")
     if old["last_seen_id"] is not None and (
@@ -649,6 +728,19 @@ def check_state_progress(old: dict[str, Any], new: dict[str, Any]) -> None:
         not new.get("last_checked_at") or datetime.fromisoformat(new["last_checked_at"]) < datetime.fromisoformat(old["last_checked_at"])
     ):
         raise MonitorError("STATE_CHECK_TIME_REGRESSION")
+    if old.get("baseline_at") != new.get("baseline_at"):
+        raise MonitorError("STATE_BASELINE_CHANGED")
+
+
+def check_state_progress(old: dict[str, Any], new: dict[str, Any]) -> None:
+    validate_state(old)
+    validate_state(new)
+    check_account_progress(old, new)
+    new_accounts = new.get("accounts", {})
+    for name, entry in old.get("accounts", {}).items():
+        if name not in new_accounts:
+            raise MonitorError("STATE_ACCOUNT_REMOVED")
+        check_account_progress(entry, new_accounts[name])
 
 
 def save_state(path: Path, state: dict[str, Any], *, allow_create: bool = False) -> None:
@@ -659,7 +751,7 @@ def save_state(path: Path, state: dict[str, Any], *, allow_create: bool = False)
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", dir=path.parent,
-            prefix=".tibo-state-", suffix=".tmp", delete=False,
+            prefix=".ai-x-state-", suffix=".tmp", delete=False,
         ) as stream:
             temp_path = Path(stream.name)
             stream.write(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
@@ -777,7 +869,10 @@ def build_notification(
     includes: dict[str, Any],
     username: str,
     translator: Any | None = None,
+    *, account: Account | None = None,
 ) -> tuple[str, str, str]:
+    account = account or LEGACY_ACCOUNT
+    author = f"{account.name} @{username} · {account.platform}"
     translator = prepare_translator([post], includes, translator)
     kind = classify_post(post)
     created_at = format_beijing_time(post.get("created_at"))
@@ -821,10 +916,10 @@ def build_notification(
     subject_preview = " ".join(content.split())
     if len(subject_preview) > 60:
         subject_preview = subject_preview[:57] + "..."
-    subject = f"[Tibo {kind}] {subject_preview or post['id']}"
+    subject = f"[{BRAND} · {kind}] {subject_preview or post['id']}"
 
     text_parts = [
-        f"Tibo @{username}",
+        author,
         f"时间：{created_at}（北京时间）",
         f"类型：{kind}",
         "",
@@ -840,7 +935,7 @@ def build_notification(
     text_body = "\n".join(text_parts)
 
     html_parts = [
-        f"<p><strong>Tibo @{html.escape(username)}</strong><br>",
+        f"<p><strong>{html.escape(author)}</strong><br>",
         f"时间：{html.escape(created_at)}（北京时间）<br>",
         f"类型：{html.escape(kind)}</p>",
         f"<blockquote style=\"white-space:pre-wrap\">{html.escape(content).replace(chr(10), '<br>')}</blockquote>",
@@ -868,15 +963,24 @@ def build_digest(
     username: str,
     translator: Any | None = None,
     report: RunReport | None = None,
+    *, account: Account | None = None,
 ) -> tuple[str, str, str]:
-    count = len(posts)
+    account = account or Account(username, LEGACY_ACCOUNT.name, LEGACY_ACCOUNT.platform)
+    return build_account_digest([(post, account) for post in posts], includes, translator, report)
+
+
+def build_account_digest(
+    entries: list[tuple[dict[str, Any], Account]],
+    includes: dict[str, Any],
+    translator: Any | None,
+    report: RunReport | None,
+) -> tuple[str, str, str]:
+    posts = [post for post, _ in entries]
+    count = len(entries)
     report = report or RunReport()
     prepared_translator = prepare_translator(posts, includes, translator, report)
-    text_parts = [f"本次检测到 {count} 条 Tibo @{username} 的新内容。"]
-    html_parts = [
-        f"<p>本次检测到 <strong>{count}</strong> 条 Tibo "
-        f"@{html.escape(username)} 的新内容。</p>"
-    ]
+    text_parts = [f"本次检测到 {count} 条新内容。"]
+    html_parts = [f"<p>本次检测到 <strong>{count}</strong> 条新内容。</p>"]
     if report.translation_fallback:
         note = f"DEGRADED / TRANSLATION_FALLBACK：{report.translation_failed}/{report.translation_needed} 项未完成中文翻译；保留完整原文。"
         text_parts.append(note)
@@ -887,15 +991,15 @@ def build_digest(
         if ref["type"] in {"replied_to", "quoted"}
     )
 
-    for index, post in enumerate(posts, start=1):
+    for index, (post, account) in enumerate(entries, start=1):
         _, text_body, html_body = build_notification(
-            post, includes, username, prepared_translator
+            post, includes, account.username, prepared_translator, account=account
         )
         text_parts.extend([f"\n--- 第 {index} 条 ---", text_body])
         html_parts.append(f"<hr><h2>第 {index} 条</h2>{html_body}")
 
     return (
-        f"[Tibo 更新] {count} 条新内容",
+        f"[{BRAND}] {count} 条新内容",
         "\n".join(text_parts),
         "".join(html_parts),
     )
@@ -915,31 +1019,22 @@ def run_monitor(
     if initialize == state["initialized"]:
         raise MonitorError("ALREADY_INITIALIZED" if initialize else "INITIALIZATION_REQUIRED")
     now = datetime.now(timezone.utc)
-    checked_at = state.get("last_checked_at")
-    report.coverage_warning = not checked_at or now - datetime.fromisoformat(checked_at) >= timedelta(days=7)
-    if report.coverage_warning:
-        print("COVERAGE_WARNING: prior successful check time unknown or at least 7 days old; Recent Search cannot prove complete historical coverage.")
-    response = x_client.fetch_posts(config.target_username, state["last_seen_id"], baseline=initialize)
-    posts = sorted(
-        {post["id"]: post for post in response["data"]}.values(),
-        key=lambda post: int(post["id"]),
-    )
-    if state["last_seen_id"] and any(int(post["id"]) <= int(state["last_seen_id"]) for post in posts):
-        raise MonitorError("X_CURSOR_VIOLATION")
-    record_fetch(report, response, len(posts))
-
-    if not state["initialized"]:
-        newest_id = posts[-1]["id"] if posts else None
-        report.batch_id = f"tibo-monitor-init-{config.target_username}"
+    if initialize:
+        response = x_client.fetch_posts(LEGACY_ACCOUNT.username, None, baseline=True)
+        posts = response["data"]
+        record_fetch(report, response, len(posts))
+        username = LEGACY_ACCOUNT.username
+        newest_id = max((post["id"] for post in posts), key=int, default=None)
+        report.batch_id = f"ai-x-monitor-init-{username}"
         email_client.send(
-            subject=f"[Tibo Monitor] @{config.target_username} 监控已启用",
+            subject=f"[{BRAND}] @{username} 监控已启用",
             text=(
-                f"已开始监控 @{config.target_username} 的原创帖、回复和引用帖。\n"
+                f"已开始监控 @{username} 的原创帖、回复和引用帖。\n"
                 "计划每 30 分钟检查；实际执行可能延迟。\n"
                 "首次运行只建立基线，不发送历史帖子。"
             ),
             html_body=(
-                f"<p>已开始监控 <strong>@{html.escape(config.target_username)}</strong>"
+                f"<p>已开始监控 <strong>@{username}</strong>"
                 " 的原创帖、回复和引用帖。</p>"
                 "<p>计划每 30 分钟检查，实际可能延迟。首次运行只建立基线，不发送历史帖子。</p>"
             ),
@@ -951,27 +1046,100 @@ def run_monitor(
         report.status = "INITIALIZED"
         return 0
 
-    if posts:
-        subject, text_body, html_body = build_digest(
-            posts, response.get("includes", {}), config.target_username, translator, report
+    account_states = dict(state.get("accounts", {}))
+    candidate = dict(state)
+    entries = []
+    includes = {"users": [], "tweets": []}
+    failures = []
+    fetch_counts = {"pages": 0, "fetched": 0, "unique_posts": 0}
+    budget = 110 / len(config.accounts) if len(config.accounts) > 1 else None
+    for account in config.accounts:
+        username = account.username
+        legacy = username == LEGACY_ACCOUNT.username
+        previous = state if legacy else account_states.get(username)
+        cursor = previous["last_seen_id"] if previous else None
+        checked_at = previous.get("last_checked_at") if previous else None
+        coverage = previous is not None and (
+            not checked_at or now - datetime.fromisoformat(checked_at) >= timedelta(days=7)
         )
-        report.batch_id = f"tibo-digest-{posts[0]['id']}-{posts[-1]['id']}"
+        if coverage:
+            report.coverage_warning = True
+            print(f"COVERAGE_WARNING: @{username} prior successful check unknown or at least 7 days old; Recent Search cannot prove complete historical coverage.")
+        options = {"baseline": previous is None}
+        if budget is not None:
+            options["budget"] = budget
+        if previous is None:
+            options["cursor_only"] = True
+        elif cursor is None and previous.get("baseline_at"):
+            options["start_time"] = previous["baseline_at"]
+        report.pages = report.fetched = report.unique_posts = 0
+        try:
+            response = x_client.fetch_posts(username, cursor, **options)
+            posts = sorted({post["id"]: post for post in response["data"]}.values(),
+                           key=lambda post: int(post["id"]))
+            if cursor and any(int(post["id"]) <= int(cursor) for post in posts):
+                raise MonitorError("X_CURSOR_VIOLATION")
+            record_fetch(report, response, len(posts))
+        except MonitorError as exc:
+            failures.append(exc)
+            result = exc.code
+        else:
+            if previous is None:
+                new_state = {"initialized": True, "last_seen_id": posts[-1]["id"] if posts else None,
+                             "last_checked_at": now.isoformat()}
+                if not posts:
+                    new_state["baseline_at"] = now.isoformat(timespec="seconds")
+                account_states[username] = new_state
+                result = "BASELINED"
+            else:
+                if posts or not checked_at or now - datetime.fromisoformat(checked_at) >= timedelta(days=1):
+                    destination = candidate if legacy else account_states[username].copy()
+                    destination["last_seen_id"] = posts[-1]["id"] if posts else cursor
+                    destination["last_checked_at"] = now.isoformat()
+                    if not legacy:
+                        account_states[username] = destination
+                if posts:
+                    entries.extend((post, account) for post in posts)
+                    for kind in includes:
+                        includes[kind].extend(response.get("includes", {}).get(kind, []))
+                result = "NEW_POSTS" if posts else "NO_NEW_POSTS"
+        metrics = {name: getattr(report, name) for name in fetch_counts}
+        report.accounts[username] = {"status": result, **metrics, "coverage_warning": coverage}
+        for name, value in metrics.items():
+            fetch_counts[name] += value
+
+    for name, value in fetch_counts.items():
+        setattr(report, name, value)
+    if len(failures) == len(config.accounts):
+        raise failures[0]
+
+    if entries:
+        entries.sort(key=lambda entry: int(entry[0]["id"]))
+        subject, text_body, html_body = build_account_digest(entries, includes, translator, report)
+        ids = [post["id"] for post, _ in entries]
+        report.batch_id = f"ai-x-digest-{ids[0]}-{ids[-1]}"
+        if len({account.username for _, account in entries}) > 1:
+            report.batch_id += "-" + hashlib.sha256(",".join(ids).encode()).hexdigest()[:16]
         email_client.send(
             subject=subject,
             text=text_body,
             html_body=html_body,
             idempotency_key=report.batch_id,
         )
-        state["last_seen_id"] = posts[-1]["id"]
-    if posts or not checked_at or now - datetime.fromisoformat(checked_at) >= timedelta(days=1):
-        state["last_checked_at"] = now.isoformat()
-        save_state(state_path, state)
+    if account_states:
+        candidate["accounts"] = account_states
+    if candidate != state:
+        save_state(state_path, candidate)
         report.state_written = True
+    if failures:
+        report.status = "PARTIAL_FAILURE"
+        report.failure_type = failures[0].code
+        return len(entries)
     report.status = (
         "DEGRADED / TRANSLATION_FALLBACK" if report.translation_fallback
-        else "SENT" if posts else "NO_NEW_POSTS"
+        else "SENT" if entries else "NO_NEW_POSTS"
     )
-    return len(posts)
+    return len(entries)
 
 
 def record_fetch(report: RunReport, response: dict[str, Any], count: int) -> None:
@@ -986,19 +1154,20 @@ def send_sample(
     email_client: Any,
     translator: Any | None,
     report: RunReport | None = None,
+    *, account: Account = LEGACY_ACCOUNT,
 ) -> None:
     report = report or RunReport()
-    response = x_client.fetch_posts(config.target_username, None, baseline=True)
+    response = x_client.fetch_posts(account.username, None, baseline=True)
     posts = response.get("data", [])
     if not posts:
         raise MonitorError("NO_SAMPLE_POSTS")
     posts.sort(key=lambda post: int(post["id"]))
     post = posts[-1]
     subject, text_body, html_body = build_digest(
-        [post], response.get("includes", {}), config.target_username, translator, report
+        [post], response.get("includes", {}), account.username, translator, report, account=account
     )
     record_fetch(report, response, len(posts))
-    report.batch_id = f"tibo-sample-{post['id']}-{time.time_ns()}"
+    report.batch_id = f"ai-x-sample-{post['id']}-{time.time_ns()}"
     email_client.send(
         subject=f"[翻译示例] {subject}",
         text=("这是翻译功能示例，不代表检测到新帖。\n\n" + text_body),
@@ -1016,6 +1185,7 @@ def send_resend(
     since_id: str,
     through_id: str,
     report: RunReport | None = None,
+    *, account: Account = LEGACY_ACCOUNT,
 ) -> None:
     report = report or RunReport()
     validate_post_id(since_id)
@@ -1024,7 +1194,7 @@ def send_resend(
         raise MonitorError("INVALID_RESEND_RANGE")
     print("COVERAGE_WARNING: resend uses only Recent Search (last 7 days); requested range completeness is not guaranteed.")
     report.coverage_warning = True
-    response = x_client.fetch_posts(config.target_username, since_id)
+    response = x_client.fetch_posts(account.username, since_id)
     posts = [
         post
         for post in response.get("data", [])
@@ -1036,10 +1206,10 @@ def send_resend(
 
     includes = response.get("includes", {})
     subject, text_body, html_body = build_digest(
-        posts, includes, config.target_username, translator, report
+        posts, includes, account.username, translator, report, account=account
     )
     record_fetch(report, response, len(posts))
-    report.batch_id = f"tibo-resend-{since_id}-{through_id}-{time.time_ns()}"
+    report.batch_id = f"ai-x-resend-{since_id}-{through_id}-{time.time_ns()}"
     email_client.send(
         subject=f"[重新翻译] {subject}",
         text=("这是历史内容的重新翻译，不代表检测到新帖。仅覆盖最近 7 天可检索结果，不保证区间完整。\n\n" + text_body),
@@ -1050,7 +1220,7 @@ def send_resend(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Monitor one X account and email new posts.")
+    parser = argparse.ArgumentParser(description="Monitor configured X accounts and email new posts.")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--initialize", action="store_true", help="Explicit first deployment only; refuses an initialized state.")
     modes.add_argument("--test-email", action="store_true", help="Send a delivery test to THIRD_ALERT_EMAIL only.")
@@ -1073,6 +1243,7 @@ def main() -> int:
         "--resend-through-id",
         help="Inclusive upper post ID for a translated history resend.",
     )
+    parser.add_argument("--account", help="Configured username for sample or resend. Defaults to thsottiaux.")
     args = parser.parse_args()
 
     report = RunReport()
@@ -1087,7 +1258,15 @@ def main() -> int:
                 or args.sample or args.initialize or args.test_email
             ):
                 raise MonitorError("INVALID_RESEND_RANGE_OR_MODE")
+        if args.account is not None and not (args.sample or args.resend_since_id is not None):
+            raise MonitorError("ACCOUNT_REQUIRES_SAMPLE_OR_RESEND")
         config = Config.from_env()
+        account = next(
+            (item for item in config.accounts if item.username == (args.account or LEGACY_ACCOUNT.username)),
+            None,
+        )
+        if account is None:
+            raise MonitorError("ACCOUNT_NOT_CONFIGURED")
         deadline = Deadline()
         x_client = XClient(config.x_bearer_token, deadline, report)
         email_client = SMTPEmailClient(
@@ -1111,16 +1290,16 @@ def main() -> int:
                 config.smtp_host, config.smtp_port, config.smtp_username,
                 config.smtp_app_password, (recipient,), report,
             )
-            report.batch_id = f"tibo-test-{time.time_ns()}"
+            report.batch_id = f"ai-x-test-{time.time_ns()}"
             client.send(
-                subject="[Tibo Monitor] Test 邮件", text="这是一封 Tibo 监控测试邮件。",
-                html_body="<p>这是一封 Tibo 监控测试邮件。</p>",
+                subject=f"[{BRAND}] 测试邮件", text=f"这是一封 {BRAND} 测试邮件。",
+                html_body=f"<p>这是一封 {BRAND} 测试邮件。</p>",
                 idempotency_key=report.batch_id,
             )
             report.status = "TEST_EMAIL_SENT"
             return 0
         if args.sample:
-            send_sample(config, x_client, email_client, translator, report)
+            send_sample(config, x_client, email_client, translator, report, account=account)
             return 0
         if args.resend_since_id is not None:
             send_resend(
@@ -1131,10 +1310,11 @@ def main() -> int:
                 args.resend_since_id,
                 args.resend_through_id,
                 report,
+                account=account,
             )
             return 0
-        return_code = run_monitor(config, x_client, email_client, args.state, translator, report, initialize=args.initialize)
-        return 0 if return_code >= 0 else 1
+        run_monitor(config, x_client, email_client, args.state, translator, report, initialize=args.initialize)
+        return 2 if report.status == "PARTIAL_FAILURE" else 0
     except Exception as exc:
         report.status = "FAILED"
         report.failure_type = exc.code if isinstance(exc, MonitorError) else type(exc).__name__

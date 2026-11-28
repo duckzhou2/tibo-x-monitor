@@ -1,4 +1,4 @@
-name = "tibo-monitor-scheduler"
+name = "ai-x-monitor-scheduler"
 main = "worker.mjs"
 compatibility_date = "2026-10-24"
 workers_dev = false
