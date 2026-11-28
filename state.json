@@ -1,5 +1,12 @@
 {
   "initialized": true,
   "last_seen_id": "2125853628250599730",
-  "last_checked_at": "2026-11-27T07:38:07.797541+00:00"
+  "last_checked_at": "2026-11-27T07:38:07.797541+00:00",
+  "accounts": {
+    "_mohansolo": {
+      "initialized": true,
+      "last_seen_id": "2126515129005363529",
+      "last_checked_at": "2026-11-28T04:54:56.564523+00:00"
+    }
+  }
 }
