@@ -38,6 +38,8 @@ class QualificationTests(unittest.TestCase):
         self.seed, self.work, self.remote = self.fixture.seed, self.fixture.work, self.fixture.remote
         for name in ("monitor.py", "persist_state.py"):
             shutil.copyfile(SOURCE / name, self.seed / name)
+        accounts = json.loads((SOURCE / "accounts.json").read_text(encoding="utf-8"))
+        (self.seed / "accounts.json").write_text(json.dumps(accounts[:1]), encoding="utf-8")
         self.initial = {
             "initialized": True, "last_seen_id": "100",
             "last_checked_at": datetime.now(timezone.utc).isoformat(),
@@ -96,6 +98,80 @@ class QualificationTests(unittest.TestCase):
 
     def text(self, message, kind="plain"):
         return message.get_body(preferencelist=(kind,)).get_content()
+
+    def enable_multi_account(self):
+        shutil.copyfile(SOURCE / "accounts.json", self.seed / "accounts.json")
+        self.fixture.seed_commit()
+        self.prepare(self.work)
+
+    def test_multi_account_baseline_then_combined_digest(self):
+        self.enable_multi_account()
+        _, report, mail = self.run_cli({"account_pages": {
+            "thsottiaux": [page()], "_mohansolo": [page([post(191), post(190)], token=1)],
+        }})
+        self.assertEqual(mail, [])
+        self.assertEqual(report["accounts"]["_mohansolo"]["status"], "BASELINED")
+        calls = json.loads((self.work / ".git/http-calls.json").read_text())
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("expansions", calls[1]["query"])
+        self.assertEqual(self.state()["last_seen_id"], "100")
+        self.assertEqual(self.state()["accounts"]["_mohansolo"]["last_seen_id"], "191")
+        self.run_cli({}, "persist", phase="persist")
+
+        root = self.fresh_runner("two-authors")
+        _, report, mail = self.run_cli({"account_pages": {
+            "thsottiaux": [page([post(103)])], "_mohansolo": [page([post(193)])],
+        }}, root=root)
+        self.assertEqual(len(mail), 1)
+        self.assertEqual(mail[0]["Subject"], "[AI X Monitor] 2 条新内容")
+        for kind in ("plain", "html"):
+            body = self.text(mail[0], kind)
+            for expected in ("Tibo Sottiaux @thsottiaux · OpenAI", "Varun Mohan @_mohansolo · Google Antigravity",
+                             "/thsottiaux/status/103", "/_mohansolo/status/193", "中文译文"):
+                self.assertIn(expected, body)
+        self.assertEqual(report["translation_success"], 2)
+        calls = json.loads((root / ".git/http-calls.json").read_text())
+        self.assertEqual([call["query"]["since_id"] for call in calls[:2]], [["100"], ["191"]])
+        self.run_cli({}, "persist", phase="persist", root=root)
+        self.assertEqual(self.fixture.remote_state()["last_seen_id"], "103")
+        self.assertEqual(self.fixture.remote_state()["accounts"]["_mohansolo"]["last_seen_id"], "193")
+
+    def test_multi_account_partial_failure_persists_healthy_progress_and_recovers(self):
+        self.enable_multi_account()
+        self.run_cli({"account_pages": {"thsottiaux": [page()], "_mohansolo": [page([post(191)])]}})
+        self.run_cli({}, "persist", phase="persist")
+        baseline = self.fixture.remote_state()
+
+        root = self.fresh_runner("partial-outage")
+        _, report, mail = self.run_cli({"account_pages": {
+            "thsottiaux": None, "_mohansolo": [page([post(192)])],
+        }}, root=root, expected=2)
+        self.assertEqual((report["status"], len(mail)), ("PARTIAL_FAILURE", 1))
+        self.assertEqual(self.state(root)["last_seen_id"], baseline["last_seen_id"])
+        self.assertEqual(self.state(root)["last_checked_at"], baseline["last_checked_at"])
+        self.run_cli({}, "persist", phase="persist", root=root)
+
+        root = self.fresh_runner("recovered")
+        _, report, mail = self.run_cli({"account_pages": {
+            "thsottiaux": [page([post(102)])], "_mohansolo": [page()],
+        }}, root=root)
+        self.assertEqual((report["status"], len(mail)), ("SENT", 1))
+        calls = json.loads((root / ".git/http-calls.json").read_text())
+        self.assertEqual([call["query"]["since_id"] for call in calls[:2]], [["100"], ["192"]])
+        self.assertEqual(self.state(root)["last_seen_id"], "102")
+
+    def test_empty_first_search_sets_stable_time_floor_without_mail(self):
+        self.enable_multi_account()
+        no_posts = {"account_pages": {"thsottiaux": [page()], "_mohansolo": [page()]}}
+        self.run_cli(no_posts)
+        self.run_cli({}, "persist", phase="persist")
+        floor = self.fixture.remote_state()["accounts"]["_mohansolo"]["baseline_at"]
+        root = self.fresh_runner("empty-baseline")
+        _, report, mail = self.run_cli(no_posts, root=root)
+        self.assertEqual((report["status"], mail), ("NO_NEW_POSTS", []))
+        calls = json.loads((root / ".git/http-calls.json").read_text())
+        self.assertEqual(calls[1]["query"]["start_time"], [floor.replace("+00:00", "Z")])
+        self.assertEqual(self.state(root)["accounts"]["_mohansolo"]["baseline_at"], floor)
 
     def test_A_no_posts_no_mail_no_heartbeat_commit(self):
         before = self.git(self.remote, "rev-parse", "main")
@@ -284,7 +360,7 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(self.state(), {"initialized": True, "last_seen_id": "110"})
         _, report, mail = self.run_cli({"pages": [page([post(111)])]})
         self.assertEqual(len(mail), 1)
-        self.assertEqual(report["batch_id"], "tibo-digest-111-111")
+        self.assertEqual(report["batch_id"], "ai-x-digest-111-111")
         self.assertIn("last_checked_at", self.state())
         calls = json.loads((self.work / ".git/http-calls.json").read_text())
         self.assertEqual(calls[0]["query"]["since_id"], ["110"])

@@ -37,7 +37,7 @@ class StateRepository:
 
     @property
     def snapshot(self) -> Path:
-        path = Path(self.git("rev-parse", "--git-path", "tibo-state-base.json"))
+        path = Path(self.git("rev-parse", "--git-path", "ai-x-state-base.json"))
         return path if path.is_absolute() else self.root / path
 
     def prepare(self) -> None:
@@ -70,7 +70,7 @@ class StateRepository:
             check_state_progress(remote, candidate)
             # Build on the latest remote tree so unrelated concurrent changes survive.
             # A private index avoids resetting or rebasing the running business checkout.
-            with tempfile.TemporaryDirectory(dir=self.snapshot.parent, prefix="tibo-index-") as directory:
+            with tempfile.TemporaryDirectory(dir=self.snapshot.parent, prefix="ai-x-index-") as directory:
                 env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / "index"))
                 self.git("read-tree", parent, env=env)
                 blob = self.git("hash-object", "-w", "--stdin", input=json.dumps(candidate, ensure_ascii=False, indent=2) + "\n")

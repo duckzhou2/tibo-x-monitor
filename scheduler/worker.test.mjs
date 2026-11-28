@@ -16,12 +16,12 @@ test("request is restricted to main monitor on this repository", async () => {
   let calls = 0;
   const result = await dispatch(env, async (url, request) => {
     calls++;
-    assert.equal(url, "https://api.github.com/repos/duckzhou2/tibo-x-monitor/actions/workflows/monitor.yml/dispatches");
+    assert.equal(url, "https://api.github.com/repositories/1310209577/actions/workflows/monitor.yml/dispatches");
     assert.equal(request.method, "POST");
     assert.equal(request.headers.Authorization, "Bearer fixture-only");
     assert.deepEqual(JSON.parse(request.body), { ref: "main", inputs: { mode: "monitor" } });
     assert.equal(request.redirect, "manual");
-    assert.equal(request.headers["User-Agent"], "tibo-monitor-scheduler");
+    assert.equal(request.headers["User-Agent"], "ai-x-monitor-scheduler");
     assert.equal(request.headers["X-GitHub-Api-Version"], "2026-03-10");
     assert.ok(request.signal instanceof AbortSignal);
     return { status: 204 };

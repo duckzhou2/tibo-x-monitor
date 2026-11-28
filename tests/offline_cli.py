@@ -34,6 +34,12 @@ def http(request, timeout):
         query = calls[-1]["query"]
         assert request.get_header("Authorization") == "Bearer fixture-x"
         index = int(query.get("next_token", ["0"])[0])
+        if "account_pages" in scenario:
+            handle = query["query"][0].split()[0].removeprefix("from:")
+            pages = scenario["account_pages"][handle]
+            if pages is None:
+                raise urllib.error.HTTPError(request.full_url, 403, "fixture-private", {}, io.BytesIO(b"fixture-private"))
+            return Response(json.dumps(pages[index]).encode("utf-8"))
         if scenario.get("x_fail_page") == index:
             raise urllib.error.HTTPError(request.full_url, 503, "fixture-private", {}, io.BytesIO(b"fixture-private"))
         return Response(json.dumps(scenario["pages"][index]).encode("utf-8"))
